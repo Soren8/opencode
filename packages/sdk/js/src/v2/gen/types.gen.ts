@@ -1654,6 +1654,16 @@ export type ServerConfig = {
   cors?: Array<string>
 }
 
+export type StackConfig = {
+  /**
+   * Primary model in the format of provider/model, eg anthropic/claude-opus-4-6
+   */
+  main: string
+  sub?: string
+  plan?: string
+  description?: string
+}
+
 export type PermissionActionConfig = "ask" | "allow" | "deny"
 
 export type PermissionObjectConfig = {
@@ -1935,6 +1945,10 @@ export type Config = {
   model?: string
   small_model?: string
   default_agent?: string
+  stack?: {
+    [key: string]: StackConfig
+  }
+  default_stack?: string
   subagent_depth?: number
   username?: string
   mode?: {

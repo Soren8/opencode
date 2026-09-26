@@ -1,5 +1,5 @@
 import { createMemo, createSignal } from "solid-js"
-import { useLocal } from "../context/local"
+import { useLocal, type StackLayer } from "../context/local"
 import { map, pipe, flatMap, entries, filter, sortBy, take } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
@@ -9,11 +9,12 @@ import * as fuzzysort from "fuzzysort"
 import { useConnected } from "./use-connected"
 import { useSync } from "../context/sync"
 
-export function DialogModel(props: { providerID?: string }) {
+export function DialogModel(props: { providerID?: string; target?: StackLayer }) {
   const local = useLocal()
   const sync = useSync()
   const dialog = useDialog()
   const [query, setQuery] = createSignal("")
+  const target = () => props.target ?? "main"
 
   const connected = useConnected()
   const providers = createDialogProviderOptions()
@@ -134,12 +135,28 @@ export function DialogModel(props: { providerID?: string }) {
   )
 
   const title = createMemo(() => {
+    const layer = target()
+    if (layer === "sub") return "Select sub model"
+    if (layer === "plan") return "Select plan model"
     const value = provider()
     if (!value) return "Select model"
     return value.name
   })
 
+  const current = createMemo(() => {
+    const layer = target()
+    if (layer === "main") return local.model.current()
+    return local.stack.selection()[layer]
+  })
+
   function onSelect(providerID: string, modelID: string) {
+    const layer = target()
+    // Sub/plan layers route every matching agent and never carry variants,
+    // so they skip the variant picker and clear straight through.
+    if (layer !== "main") {
+      if (local.stack.setLayer(layer, { providerID, modelID })) dialog.clear()
+      return
+    }
     local.model.set({ providerID, modelID }, { recent: true })
     const list = local.model.variant.list()
     const cur = local.model.variant.selected()
@@ -178,7 +195,7 @@ export function DialogModel(props: { providerID?: string }) {
       flat={true}
       skipFilter={true}
       title={title()}
-      current={local.model.current()}
+      current={current()}
     />
   )
 }

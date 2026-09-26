@@ -40,6 +40,7 @@ import { LocationProvider } from "./context/location"
 import { LocalProvider, useLocal } from "./context/local"
 import { PermissionProvider } from "./context/permission"
 import { DialogModel } from "./component/dialog-model"
+import { DialogStack } from "./component/dialog-stack"
 import { useConnected } from "./component/use-connected"
 import { DialogMcp } from "./component/dialog-mcp"
 import { DialogStatus } from "./component/dialog-status"
@@ -638,6 +639,32 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         slashAliases: ["mo"],
         run: () => {
           dialog.replace(() => <DialogModel />)
+        },
+      },
+      {
+        name: "stack.list",
+        title: "Switch stack",
+        suggested: true,
+        category: "Agent",
+        slashName: "stack",
+        run: () => {
+          dialog.replace(() => <DialogStack />)
+        },
+      },
+      {
+        name: "model.sub",
+        title: "Switch sub model",
+        category: "Agent",
+        run: () => {
+          dialog.replace(() => <DialogModel target="sub" />)
+        },
+      },
+      {
+        name: "model.plan",
+        title: "Switch plan model",
+        category: "Agent",
+        run: () => {
+          dialog.replace(() => <DialogModel target="plan" />)
         },
       },
       {

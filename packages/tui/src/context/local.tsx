@@ -48,6 +48,33 @@ export function recentModels(
     .map((item) => ({ providerID: item.providerID, modelID: item.modelID }))
 }
 
+export type StackLayer = "main" | "sub" | "plan"
+
+export type StackRef = {
+  providerID: string
+  modelID: string
+}
+
+export type StackSelection = {
+  name?: string
+  main?: StackRef
+  sub?: StackRef
+  plan?: StackRef
+}
+
+function parseStackRef(value: unknown): StackRef | undefined {
+  if (typeof value !== "string") return undefined
+  const { providerID, modelID } = parseModel(value)
+  if (!providerID || !modelID) return undefined
+  return { providerID, modelID }
+}
+
+export function stackRoleForAgent(agent: { name: string; mode: string }): StackLayer {
+  if (agent.name === "plan") return "plan"
+  if (agent.mode === "subagent") return "sub"
+  return "main"
+}
+
 export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
   name: "Local",
   init: () => {
@@ -133,6 +160,189 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     }
 
     const agent = createAgent()
+
+    function createStack() {
+      const [stackStore, setStackStore] = createStore<{
+        ready: boolean
+        touched: boolean
+        name?: string
+        main?: StackRef
+        sub?: StackRef
+        plan?: StackRef
+      }>({
+        ready: false,
+        touched: false,
+      })
+      const filePath = path.join(paths.state, "stack.json")
+      const state = {
+        pending: false,
+      }
+
+      function selection(): StackSelection {
+        return {
+          ...(stackStore.name ? { name: stackStore.name } : {}),
+          ...(stackStore.main ? { main: { ...stackStore.main } } : {}),
+          ...(stackStore.sub ? { sub: { ...stackStore.sub } } : {}),
+          ...(stackStore.plan ? { plan: { ...stackStore.plan } } : {}),
+        }
+      }
+
+      function save() {
+        if (!stackStore.ready) {
+          state.pending = true
+          return
+        }
+        state.pending = false
+        void writeJsonAtomic(filePath, selection())
+      }
+
+      function validRef(value: unknown): StackRef | undefined {
+        if (!value || typeof value !== "object") return undefined
+        const ref = value as Partial<StackRef>
+        if (typeof ref.providerID !== "string" || typeof ref.modelID !== "string") return undefined
+        const model = { providerID: ref.providerID, modelID: ref.modelID }
+        return isModelValid(model) ? model : undefined
+      }
+
+      readJson<unknown>(filePath)
+        .then((x) => {
+          if (!x || typeof x !== "object") return
+          const value = x as Record<string, unknown>
+          batch(() => {
+            if (typeof value.name === "string") setStackStore("name", value.name)
+            const main = validRef(value.main)
+            if (main) setStackStore("main", main)
+            const sub = validRef(value.sub)
+            if (sub) setStackStore("sub", sub)
+            const plan = validRef(value.plan)
+            if (plan) setStackStore("plan", plan)
+            if (value.name || main || sub || plan) setStackStore("touched", true)
+          })
+        })
+        .catch(() => {})
+        .finally(() => {
+          setStackStore("ready", true)
+          if (state.pending) save()
+        })
+
+      const definitions = createMemo(() => {
+        const raw = sync.data.config.stack
+        const stacks: Record<string, StackSelection> = {}
+        if (raw && typeof raw === "object") {
+          for (const [name, entry] of Object.entries(raw)) {
+            if (!entry || typeof entry !== "object") continue
+            const main = parseStackRef(entry.main)
+            if (!main || !isModelValid(main)) continue
+            const sub = parseStackRef(entry.sub)
+            const plan = parseStackRef(entry.plan)
+            stacks[name] = {
+              name,
+              main,
+              sub: sub && isModelValid(sub) ? sub : main,
+              plan: plan && isModelValid(plan) ? plan : main,
+            }
+          }
+        }
+        return stacks
+      })
+
+      const defaultName = createMemo(() => {
+        const name = sync.data.config.default_stack
+        if (typeof name !== "string") return undefined
+        return definitions()[name] ? name : undefined
+      })
+
+      // Adopt the configured default stack until the user picks or tweaks.
+      // Runs again when config arrives after boot.
+      createEffect(() => {
+        if (!stackStore.ready || stackStore.touched) return
+        const def = definitions()[defaultName() ?? ""]
+        if (!def) return
+        batch(() => {
+          setStackStore("name", def.name)
+          if (def.main) setStackStore("main", { ...def.main })
+          if (def.sub) setStackStore("sub", { ...def.sub })
+          if (def.plan) setStackStore("plan", { ...def.plan })
+          save()
+        })
+      })
+
+      function role(agent: { name: string; mode: string }): StackLayer {
+        return stackRoleForAgent(agent)
+      }
+
+      return {
+        get ready() {
+          return stackStore.ready
+        },
+        selection,
+        definitions,
+        defaultName,
+        name() {
+          return stackStore.name
+        },
+        layerFor(agent: { name: string; mode: string } | undefined): StackRef | undefined {
+          if (!agent) return undefined
+          const layer = role(agent)
+          const ref = stackStore[layer]
+          if (!ref) return undefined
+          return isModelValid(ref) ? { ...ref } : undefined
+        },
+        apply(name: string) {
+          const def = definitions()[name]
+          if (!def?.main) {
+            toast.show({ variant: "warning", message: `Stack not found: ${name}`, duration: 3000 })
+            return false
+          }
+          batch(() => {
+            setStackStore("touched", true)
+            setStackStore("name", name)
+            setStackStore("main", def.main ? { ...def.main } : undefined)
+            setStackStore("sub", def.sub ? { ...def.sub } : undefined)
+            setStackStore("plan", def.plan ? { ...def.plan } : undefined)
+            save()
+          })
+          toast.show({ variant: "success", message: `Stack ${name}`, duration: 2000 })
+          return true
+        },
+        setLayer(layer: StackLayer, model: StackRef) {
+          if (!isModelValid(model)) {
+            toast.show({
+              message: `Model ${model.providerID}/${model.modelID} is not valid`,
+              variant: "warning",
+              duration: 3000,
+            })
+            return false
+          }
+          batch(() => {
+            setStackStore("touched", true)
+            setStackStore("name", undefined)
+            setStackStore(layer, { ...model })
+            save()
+          })
+          return true
+        },
+        // Best-effort sync so server-side subagents follow the stack.
+        // Primary prompts already carry the right model explicitly.
+        async push(sessionID: string) {
+          const sel = selection()
+          if (!sel.name && !sel.main && !sel.sub && !sel.plan) return
+          try {
+            const current = sync.session.get(sessionID)
+            const metadata = { ...((current?.metadata ?? {}) as Record<string, unknown>) }
+            metadata.stack = {
+              ...(sel.name ? { name: sel.name } : {}),
+              ...(sel.main ? { main: `${sel.main.providerID}/${sel.main.modelID}` } : {}),
+              ...(sel.sub ? { sub: `${sel.sub.providerID}/${sel.sub.modelID}` } : {}),
+              ...(sel.plan ? { plan: `${sel.plan.providerID}/${sel.plan.modelID}` } : {}),
+            }
+            await sdk.client.session.update({ sessionID, metadata }).catch(() => {})
+          } catch {}
+        },
+      }
+    }
+
+    const stack = createStack()
 
     function createModel() {
       const [modelStore, setModelStore] = createStore<{
@@ -239,6 +449,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           getFirstValidModel(
             () => a && modelStore.model[a.name],
             () => a && a.model,
+            () => a && stack.layerFor(a),
             fallbackModel,
           ) ?? undefined
         )
@@ -533,6 +744,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const result = {
       model,
       agent,
+      stack,
       mcp,
       session,
       permission,

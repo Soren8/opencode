@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { parseModel, recentModels } from "../../src/context/local"
+import { parseModel, recentModels, stackRoleForAgent } from "../../src/context/local"
 
 test("parses model IDs containing slashes", () => {
   expect(parseModel("provider/family/model")).toEqual({
@@ -19,4 +19,12 @@ test("moves a model to the front, deduplicates, and limits recents", () => {
     ...recent.slice(0, 5),
     ...recent.slice(6, 10),
   ])
+})
+
+test("maps agents to stack layers", () => {
+  expect(stackRoleForAgent({ name: "plan", mode: "primary" })).toBe("plan")
+  expect(stackRoleForAgent({ name: "general", mode: "subagent" })).toBe("sub")
+  expect(stackRoleForAgent({ name: "explore", mode: "subagent" })).toBe("sub")
+  expect(stackRoleForAgent({ name: "build", mode: "primary" })).toBe("main")
+  expect(stackRoleForAgent({ name: "custom", mode: "all" })).toBe("main")
 })

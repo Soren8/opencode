@@ -211,6 +211,12 @@ export function Prompt(props: PromptProps) {
   const move = usePromptMove({ projectID: project.project, sessionID: () => props.sessionID })
   const [cursorVersion, setCursorVersion] = createSignal(0)
   const currentProviderLabel = createMemo(() => local.model.parsed().provider)
+  const stackLabel = createMemo(() => {
+    const sel = local.stack.selection()
+    if (sel.name) return sel.name
+    if (sel.main ?? sel.sub ?? sel.plan) return "custom"
+    return undefined
+  })
   const hasRightContent = createMemo(() => Boolean(props.right))
 
   function promptModelWarning() {
@@ -1091,6 +1097,9 @@ export function Prompt(props: PromptProps) {
       })
     } else {
       move.startSubmit()
+      // Sync the active stack so server-side subagents follow it. The
+      // primary prompt already carries its model explicitly.
+      void local.stack.push(sessionID)
       sdk.client.session
         .prompt(
           {
@@ -1469,6 +1478,14 @@ export function Prompt(props: PromptProps) {
                                 {local.model.variant.current()}
                               </span>
                             </text>
+                          </Show>
+                          <Show when={stackLabel()}>
+                            {(label) => (
+                              <>
+                                <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>·</text>
+                                <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{label()}</text>
+                              </>
+                            )}
                           </Show>
                         </box>
                       </Show>
