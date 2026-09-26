@@ -2,6 +2,7 @@ import * as Tool from "./tool"
 import DESCRIPTION from "./task.txt"
 import { ToolJsonSchema } from "./json-schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { ConfigStackV1 } from "@opencode-ai/core/v1/config/stack"
 import { BackgroundJob } from "@/background/job"
 import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
@@ -183,12 +184,25 @@ export const TaskTool = Tool.define(
 
       const stackSub = yield* stack.resolve(parent.metadata, "sub")
       const stackSubVariant = stackSub ? yield* stack.resolveVariant(parent.metadata, "sub") : undefined
-      const model = next.model ??
+      const selection = parent.metadata?.stack
+      const selectedSub =
+        selection && typeof selection === "object" && "sub" in selection && ConfigStackV1.parseModelRef(selection.sub)
+          ? stackSub
+          : undefined
+      const model = selectedSub ??
+        next.model ??
         stackSub ?? {
           modelID: msg.info.modelID,
           providerID: msg.info.providerID,
         }
-      const taskVariant = next.model ? undefined : stackSub ? stackSubVariant : variant
+      // Explicit default prevents the configured agent effort from being reapplied to a UI selection.
+      const taskVariant = selectedSub
+        ? (stackSubVariant ?? "default")
+        : next.model
+          ? undefined
+          : stackSub
+            ? stackSubVariant
+            : variant
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,

@@ -376,7 +376,7 @@ The `small_model` option configures a separate model for lightweight tasks like 
 
 ### Stacks
 
-Stacks are named Main + Sub agent combinations you can hop between without editing config. Each stack sets a `main` orchestrator model, a `sub` workhorse model for all subagents without an explicit `agent.model`, and an optional `plan` model for plan mode (defaults to `main`).
+Stacks are named Main + Sub agent combinations you can hop between without editing config. Each stack sets a `main` orchestrator model, a `sub` workhorse model, and an optional `plan` model for plan mode (defaults to `main`).
 
 ```json title="opencode.json"
 {
@@ -396,7 +396,7 @@ Stacks are named Main + Sub agent combinations you can hop between without editi
 }
 ```
 
-Switch stacks with the `Switch stack` command, or tweak one layer with `Switch main/sub/plan model`. The active stack persists across sessions and applies to new subagents; agents with an explicit `model` always keep it.
+Switch stacks with the `Switch stack` command, or tweak one layer with `Switch main/sub/plan model`. The active stack persists across sessions and applies to new subagent turns. A Sub model and effort selection sent by the UI takes precedence over the subagent's file-configured model and effort. Without that session selection, an explicit `agent.model` takes precedence over the configured default stack, followed by the parent model when neither is set.
 
 The prompt footer previews the selected model and effort for the next turn when idle; running turns and subagent sessions show the model and effort recorded for that turn. Subagent task entries and session footers show their recorded model and effort as well.
 

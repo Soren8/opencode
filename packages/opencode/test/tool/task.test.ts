@@ -170,6 +170,83 @@ function reply(
 }
 
 describe("tool.task", () => {
+  for (const scenario of [
+    {
+      name: "UI Sub model and effort override the configured general agent",
+      selection: { sub: "test/selected", sub_variant: "low" },
+      modelID: "selected",
+      variant: "low",
+    },
+    {
+      name: "UI default effort overrides the configured effort even for the same model",
+      selection: { sub: "test/configured" },
+      modelID: "configured",
+      variant: "default",
+    },
+    {
+      name: "configured general model wins over the default stack without a UI Sub selection",
+      selection: {},
+      modelID: "configured",
+      variant: undefined,
+    },
+  ]) {
+    it.instance(
+      scenario.name,
+      () =>
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const seeded = yield* seed()
+          yield* sessions.setMetadata({ sessionID: seeded.chat.id, metadata: { stack: scenario.selection } })
+          const tool = yield* TaskTool
+          const def = yield* tool.init()
+          const prompts: SessionPrompt.PromptInput[] = []
+
+          const result = yield* def.execute(
+            { description: "inspect bug", prompt: "inspect the cache key", subagent_type: "general" },
+            {
+              sessionID: seeded.chat.id,
+              messageID: seeded.assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: (input) => prompts.push(input) }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+
+          expect(prompts).toHaveLength(1)
+          expect(prompts[0]?.model).toEqual({
+            providerID: ProviderV2.ID.make("test"),
+            modelID: ModelV2.ID.make(scenario.modelID),
+          })
+          expect(prompts[0]?.variant).toBe(scenario.variant)
+          expect(result.metadata.model).toEqual({
+            providerID: ProviderV2.ID.make("test"),
+            modelID: ModelV2.ID.make(scenario.modelID),
+          })
+          expect(result.metadata.variant).toBe(scenario.variant)
+        }),
+      {
+        config: {
+          agent: { general: { model: "test/configured", variant: "high" } },
+          default_stack: "base",
+          stack: { base: { main: "test/test-model", sub: "test/selected" } },
+          provider: {
+            test: {
+              npm: "@ai-sdk/openai-compatible",
+              options: { apiKey: "test-key", baseURL: "http://localhost:1/v1" },
+              models: {
+                selected: { name: "Selected", variants: { low: {}, high: {} } },
+                configured: { name: "Configured", variants: { low: {}, high: {} } },
+              },
+            },
+          },
+        },
+      },
+    )
+  }
+
   it.instance(
     "description sorts subagents by name and is stable across calls",
     () =>
