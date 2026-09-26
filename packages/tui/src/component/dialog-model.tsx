@@ -179,36 +179,20 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
 
   function onSelect(providerID: string, modelID: string) {
     const layer = target()
-    // Sub/plan layers route every matching agent. Offer their own effort
-    // picker exactly like the main flow, keyed to the picked model.
     if (layer !== "main") {
       if (!local.stack.setLayer(layer, { providerID, modelID })) return
-      const picked = { providerID, modelID }
-      const list = local.model.variant.listFor(picked)
-      const cur = local.model.variant.selectedFor(picked)
-      if (cur === "default" || (cur && list.includes(cur))) {
-        dialog.clear()
-        return
-      }
-      if (list.length > 0) {
-        dialog.replace(() => <DialogVariant model={picked} />)
-        return
-      }
+    } else {
+      local.model.set({ providerID, modelID }, { recent: true })
+    }
+    // Always offer the effort picker when the model has variants. The
+    // stored choice is preselected, so confirming is a single Enter —
+    // and there is no hidden "sometimes it pops, sometimes not" state.
+    const picked = { providerID, modelID }
+    if (local.model.variant.listFor(picked).length === 0) {
       dialog.clear()
       return
     }
-    local.model.set({ providerID, modelID }, { recent: true })
-    const list = local.model.variant.list()
-    const cur = local.model.variant.selected()
-    if (cur === "default" || (cur && list.includes(cur))) {
-      dialog.clear()
-      return
-    }
-    if (list.length > 0) {
-      dialog.replace(() => <DialogVariant />)
-      return
-    }
-    dialog.clear()
+    dialog.replace(() => <DialogVariant model={picked} />)
   }
 
   return (
