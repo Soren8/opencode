@@ -182,6 +182,7 @@ export const TaskTool = Tool.define(
       const variant = msg.info.variant
 
       const stackSub = yield* stack.resolve(parent.metadata, "sub")
+      const stackSubVariant = stackSub ? yield* stack.resolveVariant(parent.metadata, "sub") : undefined
       const model = next.model ?? stackSub ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
@@ -210,7 +211,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: (next.model ?? stackSub) ? undefined : variant,
+          variant: next.model ? undefined : (stackSub ? stackSubVariant : variant),
           agent: next.name,
           parts,
         })

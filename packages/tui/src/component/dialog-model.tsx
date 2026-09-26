@@ -179,10 +179,22 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
 
   function onSelect(providerID: string, modelID: string) {
     const layer = target()
-    // Sub/plan layers route every matching agent and never carry variants,
-    // so they skip the variant picker and clear straight through.
+    // Sub/plan layers route every matching agent. Offer their own effort
+    // picker exactly like the main flow, keyed to the picked model.
     if (layer !== "main") {
-      if (local.stack.setLayer(layer, { providerID, modelID })) dialog.clear()
+      if (!local.stack.setLayer(layer, { providerID, modelID })) return
+      const picked = { providerID, modelID }
+      const list = local.model.variant.listFor(picked)
+      const cur = local.model.variant.selectedFor(picked)
+      if (cur === "default" || (cur && list.includes(cur))) {
+        dialog.clear()
+        return
+      }
+      if (list.length > 0) {
+        dialog.replace(() => <DialogVariant model={picked} />)
+        return
+      }
+      dialog.clear()
       return
     }
     local.model.set({ providerID, modelID }, { recent: true })

@@ -1,11 +1,28 @@
 import { createMemo } from "solid-js"
-import { useLocal } from "../context/local"
+import { useLocal, type StackRef } from "../context/local"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
 
-export function DialogVariant() {
+export function DialogVariant(props: { model?: StackRef }) {
   const local = useLocal()
   const dialog = useDialog()
+  const target = () => props.model
+
+  function list() {
+    const m = target()
+    return m ? local.model.variant.listFor(m) : local.model.variant.list()
+  }
+
+  function selected() {
+    const m = target()
+    return m ? local.model.variant.selectedFor(m) : local.model.variant.selected()
+  }
+
+  function set(value: string | undefined) {
+    const m = target()
+    if (m) local.model.variant.setFor(m, value)
+    else local.model.variant.set(value)
+  }
 
   const options = createMemo(() => {
     return [
@@ -14,25 +31,32 @@ export function DialogVariant() {
         title: "Default",
         onSelect: () => {
           dialog.clear()
-          local.model.variant.set(undefined)
+          set(undefined)
         },
       },
-      ...local.model.variant.list().map((variant) => ({
+      ...list().map((variant) => ({
         value: variant,
         title: variant,
         onSelect: () => {
           dialog.clear()
-          local.model.variant.set(variant)
+          set(variant)
         },
       })),
     ]
   })
 
+  const title = createMemo(() => {
+    const m = target()
+    if (!m) return "Select variant"
+    const id = m.modelID.split("/").pop() ?? m.modelID
+    return `Select variant · ${id}`
+  })
+
   return (
     <DialogSelect<string>
       options={options()}
-      title={"Select variant"}
-      current={local.model.variant.selected()}
+      title={title()}
+      current={selected()}
       flat={true}
     />
   )

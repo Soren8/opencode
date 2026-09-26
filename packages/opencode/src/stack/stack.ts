@@ -1,6 +1,7 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import { ConfigStackV1 } from "@opencode-ai/core/v1/config/stack"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -18,12 +19,18 @@ export interface Selection {
   readonly main?: ModelRef
   readonly sub?: ModelRef
   readonly plan?: ModelRef
+  readonly subVariant?: string
+  readonly planVariant?: string
 }
 
 export interface Interface {
   readonly list: () => Effect.Effect<Record<string, Selection>>
   readonly get: (metadata?: Record<string, unknown>) => Effect.Effect<Selection | undefined>
   readonly resolve: (metadata: Record<string, unknown> | undefined, layer: Layer) => Effect.Effect<ModelRef | undefined>
+  readonly resolveVariant: (
+    metadata: Record<string, unknown> | undefined,
+    layer: Layer,
+  ) => Effect.Effect<string | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Stack") {}
@@ -56,12 +63,16 @@ function selectionFromMetadata(value: unknown): Selection | undefined {
   const main = parseRef(record.main)
   const sub = parseRef(record.sub)
   const plan = parseRef(record.plan)
-  if (!name && !main && !sub && !plan) return undefined
+  const subVariant = typeof record.sub_variant === "string" && record.sub_variant ? record.sub_variant : undefined
+  const planVariant = typeof record.plan_variant === "string" && record.plan_variant ? record.plan_variant : undefined
+  if (!name && !main && !sub && !plan && !subVariant && !planVariant) return undefined
   return {
     ...(name ? { name } : {}),
     ...(main ? { main } : {}),
     ...(sub ? { sub } : {}),
     ...(plan ? { plan } : {}),
+    ...(subVariant ? { subVariant } : {}),
+    ...(planVariant ? { planVariant } : {}),
   }
 }
 
@@ -69,6 +80,7 @@ const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const config = yield* Config.Service
+    const provider = yield* Provider.Service
 
     const list = Effect.fn("Stack.list")(function* () {
       const cfg = yield* config.get()
@@ -97,6 +109,8 @@ const layer = Layer.effect(
         main: override?.main ?? active?.main,
         sub: override?.sub ?? active?.sub,
         plan: override?.plan ?? active?.plan,
+        subVariant: override?.subVariant,
+        planVariant: override?.planVariant,
       }
     })
 
@@ -107,14 +121,31 @@ const layer = Layer.effect(
       return (yield* get(metadata))?.[layer]
     })
 
-    return Service.of({ list, get, resolve })
+    // Variant explicitly chosen for a stack layer (e.g. sub effort level).
+    // Validated against the resolved model so stale picks fail closed.
+    const resolveVariant = Effect.fn("Stack.resolveVariant")(function* (
+      metadata: Record<string, unknown> | undefined,
+      layer: Layer,
+    ) {
+      const selection = yield* get(metadata)
+      const ref = selection?.[layer]
+      const variant = layer === "sub" ? selection?.subVariant : layer === "plan" ? selection?.planVariant : undefined
+      if (!ref || !variant) return undefined
+      const full = yield* provider
+        .getModel(ref.providerID, ref.modelID)
+        .pipe(Effect.catch(() => Effect.succeed(undefined)))
+      if (!full?.variants?.[variant]) return undefined
+      return variant
+    })
+
+    return Service.of({ list, get, resolve, resolveVariant })
   }),
 )
 
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Config.node],
+  deps: [Config.node, Provider.node],
 })
 
 export * as Stack from "./stack"

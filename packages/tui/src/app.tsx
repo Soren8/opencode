@@ -756,6 +756,52 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         },
       },
       {
+        name: "variant.sub",
+        title: "Switch sub variant",
+        category: "Agent",
+        run: () => {
+          const sub = local.stack.selection().sub
+          if (!sub) {
+            return toast.show({
+              title: "No sub model set",
+              message: "Pick a sub model first, then choose its effort level.",
+              variant: "info",
+            })
+          }
+          if (local.model.variant.listFor(sub).length === 0) {
+            return toast.show({
+              title: "No variants available",
+              message: "The sub model does not support any variants.",
+              variant: "info",
+            })
+          }
+          dialog.replace(() => <DialogVariant model={sub} />)
+        },
+      },
+      {
+        name: "variant.plan",
+        title: "Switch plan variant",
+        category: "Agent",
+        run: () => {
+          const plan = local.stack.selection().plan
+          if (!plan) {
+            return toast.show({
+              title: "No plan model set",
+              message: "Pick a plan model first, then choose its effort level.",
+              variant: "info",
+            })
+          }
+          if (local.model.variant.listFor(plan).length === 0) {
+            return toast.show({
+              title: "No variants available",
+              message: "The plan model does not support any variants.",
+              variant: "info",
+            })
+          }
+          dialog.replace(() => <DialogVariant model={plan} />)
+        },
+      },
+      {
         name: "agent.cycle.reverse",
         title: "Agent cycle reverse",
         category: "Agent",

@@ -323,18 +323,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return true
         },
         // Best-effort sync so server-side subagents follow the stack.
-        // Primary prompts already carry the right model explicitly.
+        // Primary prompts already carry their model explicitly.
         async push(sessionID: string) {
           const sel = selection()
           if (!sel.name && !sel.main && !sel.sub && !sel.plan) return
           try {
             const current = sync.session.get(sessionID)
             const metadata = { ...((current?.metadata ?? {}) as Record<string, unknown>) }
+            const subVariant = sel.sub ? model.variant.currentFor(sel.sub) : undefined
+            const planVariant = sel.plan ? model.variant.currentFor(sel.plan) : undefined
             metadata.stack = {
               ...(sel.name ? { name: sel.name } : {}),
               ...(sel.main ? { main: `${sel.main.providerID}/${sel.main.modelID}` } : {}),
               ...(sel.sub ? { sub: `${sel.sub.providerID}/${sel.sub.modelID}` } : {}),
               ...(sel.plan ? { plan: `${sel.plan.providerID}/${sel.plan.modelID}` } : {}),
+              ...(subVariant ? { sub_variant: subVariant } : {}),
+              ...(planVariant ? { plan_variant: planVariant } : {}),
             }
             await sdk.client.session.update({ sessionID, metadata }).catch(() => {})
           } catch {}
@@ -574,44 +578,58 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           selected() {
             const m = currentModel()
             if (!m) return undefined
-            const key = `${m.providerID}/${m.modelID}`
-            return modelStore.variant[key]
+            return this.selectedFor(m)
           },
           current() {
-            const v = this.selected()
-            if (!v) return undefined
-            if (!this.list().includes(v)) return undefined
-            return v
+            const m = currentModel()
+            if (!m) return undefined
+            return this.currentFor(m)
           },
           list() {
             const m = currentModel()
             if (!m) return []
-            const provider = sync.data.provider.find((item) => item.id === m.providerID)
-            const info = provider?.models[m.modelID]
-            if (!info?.variants) return []
-            return Object.keys(info.variants)
+            return this.listFor(m)
           },
           set(value: string | undefined) {
             const m = currentModel()
             if (!m) return
-            const key = `${m.providerID}/${m.modelID}`
-            setModelStore("variant", key, value ?? "default")
-            save()
+            this.setFor(m, value)
           },
           cycle() {
-            const variants = this.list()
+            const m = currentModel()
+            if (!m) return
+            const variants = this.listFor(m)
             if (variants.length === 0) return
-            const current = this.current()
+            const current = this.currentFor(m)
             if (!current) {
-              this.set(variants[0])
+              this.setFor(m, variants[0])
               return
             }
             const index = variants.indexOf(current)
             if (index === -1 || index === variants.length - 1) {
-              this.set(undefined)
+              this.setFor(m, undefined)
               return
             }
-            this.set(variants[index + 1])
+            this.setFor(m, variants[index + 1])
+          },
+          selectedFor(model: { providerID: string; modelID: string }) {
+            return modelStore.variant[`${model.providerID}/${model.modelID}`]
+          },
+          currentFor(model: { providerID: string; modelID: string }) {
+            const v = this.selectedFor(model)
+            if (!v) return undefined
+            if (!this.listFor(model).includes(v)) return undefined
+            return v
+          },
+          listFor(model: { providerID: string; modelID: string }) {
+            const provider = sync.data.provider.find((item) => item.id === model.providerID)
+            const info = provider?.models[model.modelID]
+            if (!info?.variants) return []
+            return Object.keys(info.variants)
+          },
+          setFor(model: { providerID: string; modelID: string }, value: string | undefined) {
+            setModelStore("variant", `${model.providerID}/${model.modelID}`, value ?? "default")
+            save()
           },
         },
       }
