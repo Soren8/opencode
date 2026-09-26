@@ -1560,7 +1560,10 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
                 ▣{" "}
               </span>{" "}
               <span style={{ fg: theme.text }}>{Locale.titlecase(props.message.mode)}</span>
-              <span style={{ fg: theme.textMuted }}> · {model()}</span>
+              <span style={{ fg: theme.textMuted }}>
+                {" "}
+                · {model()} · {props.message.variant ?? "default"}
+              </span>
               <Show when={duration()}>
                 <span style={{ fg: theme.textMuted }}> · {Locale.duration(duration())}</span>
               </Show>
@@ -2225,6 +2228,17 @@ function Task(props: ToolProps) {
 
   const sessionID = createMemo(() => stringValue(props.metadata.sessionId))
   const messages = createMemo(() => sync.data.message[sessionID() ?? ""] ?? [])
+  const selection = createMemo(() => {
+    const recorded = messages().findLast((item) => item.role === "assistant" || item.role === "user")
+    if (recorded?.role === "assistant")
+      return { providerID: recorded.providerID, modelID: recorded.modelID, variant: recorded.variant }
+    if (recorded?.role === "user") return recorded.model
+    const ref = recordValue(props.metadata.model)
+    const providerID = stringValue(ref?.providerID)
+    const modelID = stringValue(ref?.modelID)
+    if (!providerID || !modelID) return undefined
+    return { providerID, modelID, variant: stringValue(props.metadata.variant) ?? "effort pending" }
+  })
 
   const tools = createMemo(() => {
     return messages().flatMap((msg) =>
@@ -2283,6 +2297,12 @@ function Task(props: ToolProps) {
 
     if (!isRunning() && props.part.state.status === "completed") {
       content.push(`↳ ${formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))}`)
+    }
+
+    const selected = selection()
+    if (selected) {
+      const model = Model.name(sync.data.provider, selected.providerID, selected.modelID)
+      content.push(`↳ ${model} · ${selected.variant ?? "default"}`)
     }
 
     return content.join("\n")

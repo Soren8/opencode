@@ -216,13 +216,18 @@ export function Prompt(props: PromptProps) {
     if (!messages) return undefined
     return messages.findLast((m): m is UserMessage => m.role === "user")
   })
+  const recordedModel = createMemo(() => {
+    if (!props.sessionID) return undefined
+    if (!sync.session.get(props.sessionID)?.parentID && status().type === "idle") return undefined
+    return lastUserMessage()?.model
+  })
   // Prefer the viewed session's own recorded model: subagent sessions never
   // sync into the global per-agent store, so without this the footer would
   // show the parent session's model here instead of what actually ran.
   const footerModel = createMemo(() => {
-    const msg = lastUserMessage()
-    if (msg?.model?.providerID && msg?.model?.modelID) {
-      return { providerID: msg.model.providerID, modelID: msg.model.modelID }
+    const value = recordedModel()
+    if (value?.providerID && value?.modelID) {
+      return { providerID: value.providerID, modelID: value.modelID }
     }
     return local.model.current()
   })
@@ -244,8 +249,8 @@ export function Prompt(props: PromptProps) {
     }
   })
   const footerVariant = createMemo(() => {
-    const variant = lastUserMessage()?.model?.variant
-    if (variant && variant !== "default") return variant
+    const recorded = recordedModel()
+    if (recorded) return recorded.variant ?? "default"
     return local.model.variant.current()
   })
   const currentProviderLabel = createMemo(() => footerParsed().provider)
@@ -1110,6 +1115,7 @@ export function Prompt(props: PromptProps) {
       sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))
     ) {
       move.startSubmit()
+      await local.stack.push(sessionID)
       // Parse command from first line, preserve multi-line content in arguments
       const firstLineEnd = inputText.indexOf("\n")
       const firstLine = firstLineEnd === -1 ? inputText : inputText.slice(0, firstLineEnd)
@@ -1130,7 +1136,7 @@ export function Prompt(props: PromptProps) {
       move.startSubmit()
       // Sync the active stack so server-side subagents follow it. The
       // primary prompt already carries its model explicitly.
-      void local.stack.push(sessionID)
+      await local.stack.push(sessionID)
       sdk.client.session
         .prompt(
           {
@@ -1334,8 +1340,7 @@ export function Prompt(props: PromptProps) {
   })
 
   const showVariant = createMemo(() => {
-    const sessionVariant = lastUserMessage()?.model?.variant
-    if (sessionVariant && sessionVariant !== "default") return true
+    if (recordedModel()) return !!footerVariant()
     const variants = local.model.variant.list()
     if (variants.length === 0) return false
     const current = local.model.variant.current()

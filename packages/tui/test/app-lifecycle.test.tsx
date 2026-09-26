@@ -6,6 +6,7 @@ import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { Global } from "@opencode-ai/core/global"
 import { createTuiResolvedConfig } from "./fixture/tui-runtime"
 import { createEventSource, createFetch, directory, json } from "./fixture/tui-sdk"
+import { tmpdir } from "./fixture/fixture"
 
 test("home prompt renders its model footer without a session", async () => {
   const setup = await createTestRenderer({ width: 100, height: 32, useThread: false })
@@ -49,6 +50,188 @@ test("home prompt renders its model footer without a session", async () => {
     expect(frame).not.toContain("opencode crashed")
     expect(frame).toContain("No provider selected")
     expect(frame).toContain("Connect a provider")
+  } finally {
+    process.emit("SIGHUP")
+    await task
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy()
+    mock.restore()
+  }
+})
+
+test("switching to plan previews its selected model and effort after a previous turn", async () => {
+  await using state = await tmpdir()
+  await Bun.write(`${state.path}/model.json`, JSON.stringify({ variant: { "test/plan": "high" } }))
+  const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+  const core = await import("@opentui/core")
+  mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
+  const events = createEventSource()
+  const calls = createFetch((url) => {
+    if (url.pathname === "/config/providers")
+      return json({
+        providers: [
+          {
+            id: "test",
+            name: "Test provider",
+            models: {
+              main: { id: "main", name: "Main Model", providerID: "test", variants: { low: {} } },
+              plan: { id: "plan", name: "Plan Model", providerID: "test", variants: { high: {} } },
+            },
+          },
+        ],
+        default: { test: "main" },
+      })
+    if (url.pathname === "/provider") return json({ all: [], default: {}, connected: ["test"] })
+    if (url.pathname === "/agent")
+      return json([
+        { name: "build", mode: "primary", permission: [] },
+        { name: "plan", mode: "primary", permission: [] },
+      ])
+    if (url.pathname === "/config")
+      return json({ default_stack: "test-stack", stack: { "test-stack": { main: "test/main", plan: "test/plan" } } })
+    if (url.pathname === "/session/test-session")
+      return json({
+        id: "test-session",
+        title: "Test session",
+        slug: "test",
+        projectID: "proj_test",
+        directory,
+        version: "0.0.0-test",
+        time: { created: 1, updated: 1 },
+      })
+    if (url.pathname === "/session/test-session/message")
+      return json([
+        {
+          info: {
+            id: "message-1",
+            sessionID: "test-session",
+            role: "user",
+            time: { created: 1 },
+            agent: "build",
+            model: { providerID: "test", modelID: "main", variant: "low" },
+          },
+          parts: [],
+        },
+      ])
+    if (url.pathname === "/session/test-session/todo" || url.pathname === "/session/test-session/diff") return json([])
+  })
+  const ready = Promise.withResolvers<void>()
+  const { run } = await import("../src/app")
+  const task = Effect.runPromise(
+    run({
+      url: "http://test",
+      directory,
+      config: createTuiResolvedConfig({ plugin_enabled: {} }),
+      fetch: calls.fetch,
+      events: events.source,
+      args: { sessionID: "test-session" },
+      pluginHost: {
+        async start(input) {
+          input.runtime.setupSlots(input.api)
+          ready.resolve()
+        },
+        async dispose() {},
+      },
+    }).pipe(
+      Effect.provideService(Global.Service, Global.make({ state: state.path })),
+      Effect.provide(AppNodeBuilder.build(Global.node)),
+    ),
+  )
+
+  try {
+    await ready.promise
+    await Bun.sleep(50)
+    await setup.renderOnce()
+    setup.mockInput.pressTab()
+    await setup.renderOnce()
+
+    const frame = setup.captureCharFrame()
+    expect(frame).toContain("Plan Model")
+    expect(frame).toContain("· high")
+    expect(frame).not.toContain("Main Model")
+    expect(frame).not.toContain("· low")
+    expect(frame).not.toContain("opencode crashed")
+  } finally {
+    process.emit("SIGHUP")
+    await task
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy()
+    mock.restore()
+  }
+})
+
+test("subagent view shows the model and effort recorded for its turn", async () => {
+  await using state = await tmpdir()
+  const setup = await createTestRenderer({ width: 110, height: 32, useThread: false })
+  const core = await import("@opentui/core")
+  mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
+  const calls = createFetch((url) => {
+    if (url.pathname === "/config/providers")
+      return json({
+        providers: [
+          {
+            id: "test",
+            name: "Test provider",
+            models: { child: { id: "child", name: "Child Model", providerID: "test", variants: { high: {} } } },
+          },
+        ],
+        default: { test: "child" },
+      })
+    if (url.pathname === "/provider") return json({ all: [], default: {}, connected: ["test"] })
+    if (url.pathname === "/agent") return json([{ name: "build", mode: "primary", permission: [] }])
+    if (url.pathname === "/session/test-child")
+      return json({
+        id: "test-child",
+        title: "Inspect (@explore subagent)",
+        parentID: "test-parent",
+        slug: "test",
+        projectID: "proj_test",
+        directory,
+        version: "0.0.0-test",
+        time: { created: 1, updated: 1 },
+      })
+    if (url.pathname === "/session/test-child/message")
+      return json([
+        {
+          info: {
+            id: "user-1",
+            sessionID: "test-child",
+            role: "user",
+            time: { created: 1 },
+            agent: "explore",
+            model: { providerID: "test", modelID: "child", variant: "high" },
+          },
+          parts: [],
+        },
+      ])
+    if (url.pathname === "/session/test-child/todo" || url.pathname === "/session/test-child/diff") return json([])
+  })
+  const ready = Promise.withResolvers<void>()
+  const { run } = await import("../src/app")
+  const task = Effect.runPromise(
+    run({
+      url: "http://test",
+      directory,
+      config: createTuiResolvedConfig({ plugin_enabled: {} }),
+      fetch: calls.fetch,
+      events: createEventSource().source,
+      args: { sessionID: "test-child" },
+      pluginHost: {
+        async start(input) {
+          input.runtime.setupSlots(input.api)
+          ready.resolve()
+        },
+        async dispose() {},
+      },
+    }).pipe(
+      Effect.provideService(Global.Service, Global.make({ state: state.path })),
+      Effect.provide(AppNodeBuilder.build(Global.node)),
+    ),
+  )
+
+  try {
+    await ready.promise
+    await Bun.sleep(50)
+    await setup.renderOnce()
+    expect(setup.captureCharFrame()).toContain("Child Model · high")
   } finally {
     process.emit("SIGHUP")
     await task

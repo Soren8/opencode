@@ -183,14 +183,17 @@ export const TaskTool = Tool.define(
 
       const stackSub = yield* stack.resolve(parent.metadata, "sub")
       const stackSubVariant = stackSub ? yield* stack.resolveVariant(parent.metadata, "sub") : undefined
-      const model = next.model ?? stackSub ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      const model = next.model ??
+        stackSub ?? {
+          modelID: msg.info.modelID,
+          providerID: msg.info.providerID,
+        }
+      const taskVariant = next.model ? undefined : stackSub ? stackSubVariant : variant
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        variant: taskVariant,
         ...(runInBackground ? { background: true } : {}),
       }
 
@@ -211,7 +214,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : (stackSub ? stackSubVariant : variant),
+          variant: taskVariant,
           agent: next.name,
           parts,
         })

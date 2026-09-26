@@ -7,12 +7,19 @@ import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "../../util/locale"
 import { useTerminalDimensions } from "@opentui/solid"
 import { useCommandShortcut, useOpencodeKeymap } from "../../keymap"
+import { name } from "../../util/model"
 
 export function SubagentFooter() {
   const route = useRouteData("session")
   const sync = useSync()
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
   const session = createMemo(() => sync.session.get(route.sessionID))
+  const selection = createMemo(() => {
+    const recorded = messages().findLast((item) => item.role === "assistant" || item.role === "user")
+    if (recorded?.role === "assistant")
+      return { providerID: recorded.providerID, modelID: recorded.modelID, variant: recorded.variant }
+    return recorded?.role === "user" ? recorded.model : undefined
+  })
 
   const subagentInfo = createMemo(() => {
     const s = session()
@@ -84,6 +91,13 @@ export function SubagentFooter() {
               <text style={{ fg: theme.textMuted }}>
                 ({subagentInfo().index} of {subagentInfo().total})
               </text>
+            </Show>
+            <Show when={selection()}>
+              {(item) => (
+                <text fg={theme.textMuted}>
+                  {name(sync.data.provider, item().providerID, item().modelID)} · {item().variant ?? "default"}
+                </text>
+              )}
             </Show>
             <Show when={usage()}>
               {(item) => (

@@ -2313,6 +2313,63 @@ it.instance("records aborted errors when prompt is cancelled mid-stream", () =>
 // Agent variant
 
 noLLMServer.instance(
+  "uses the selected plan stack model and effort for a plan prompt",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        metadata: {
+          stack: {
+            plan: "test/test-model",
+            plan_variant: "high",
+          },
+        },
+      })
+
+      const result = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "plan",
+        noReply: true,
+        parts: [{ type: "text", text: "plan the implementation" }],
+      })
+      if (result.info.role !== "user") throw new Error("expected user message")
+      expect(result.info.model).toEqual({
+        providerID: ProviderV2.ID.make("test"),
+        modelID: ModelV2.ID.make("test-model"),
+        variant: "high",
+      })
+
+      const override = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "plan",
+        variant: "low",
+        noReply: true,
+        parts: [{ type: "text", text: "use low effort this turn" }],
+      })
+      if (override.info.role !== "user") throw new Error("expected user message")
+      expect(override.info.model.variant).toBe("low")
+    }),
+  {
+    config: {
+      ...cfg,
+      provider: {
+        ...cfg.provider,
+        test: {
+          ...cfg.provider.test,
+          models: {
+            "test-model": {
+              ...cfg.provider.test.models["test-model"],
+              variants: { high: {}, low: {} },
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+noLLMServer.instance(
   "applies agent variant only when using agent model",
   () =>
     Effect.gen(function* () {

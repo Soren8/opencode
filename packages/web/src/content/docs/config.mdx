@@ -398,6 +398,10 @@ Stacks are named Main + Sub agent combinations you can hop between without editi
 
 Switch stacks with the `Switch stack` command, or tweak one layer with `Switch main/sub/plan model`. The active stack persists across sessions and applies to new subagents; agents with an explicit `model` always keep it.
 
+The prompt footer previews the selected model and effort for the next turn when idle; running turns and subagent sessions show the model and effort recorded for that turn. Subagent task entries and session footers show their recorded model and effort as well.
+
+An effort label of `default` means no explicit variant was recorded; it does not imply a specific provider reasoning level. Before a child message is available, task entries use the requested model and effort, or show `effort pending` if the effort has not been resolved yet.
+
 Provider options can include `timeout`, `headerTimeout`, `chunkTimeout`, and `setCacheKey`:
 
 ```json title="opencode.json"

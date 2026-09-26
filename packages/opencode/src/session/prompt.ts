@@ -650,6 +650,13 @@ const layer = Layer.effect(
         .resolve(existing.metadata, ag.name === "plan" ? "plan" : "main")
         .pipe(Effect.orDie)
       const model = input.model ?? ag.model ?? stackModel ?? (yield* currentModel(input.sessionID))
+      const stackVariant =
+        ag.name === "plan" &&
+        stackModel &&
+        model.providerID === stackModel.providerID &&
+        model.modelID === stackModel.modelID
+          ? yield* stack.resolveVariant(existing.metadata, "plan")
+          : undefined
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.variant && ag.variant && same
@@ -657,7 +664,8 @@ const layer = Layer.effect(
               .getModel(model.providerID, model.modelID)
               .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined)))
           : undefined
-      const variant = input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined)
+      const variant =
+        input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined) ?? stackVariant
 
       const info: SessionV1.User = {
         id: input.messageID ?? MessageID.ascending(),
