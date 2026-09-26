@@ -43,6 +43,14 @@ export function DialogStack() {
       skipFilter={true}
       title="Select stack"
       current={local.stack.name()}
+      emptyView={
+        <box paddingLeft={4} paddingRight={4} paddingTop={1} flexDirection="column">
+          <text>No stacks configured yet.</text>
+          <text>Add a `stack` map to opencode.json:</text>
+          <text>{`{"stack": {"daily": {`}</text>
+          <text>{`  "main": "p/model", "sub": "p/cheap"}}}`}</text>
+        </box>
+      }
     />
   )
 }

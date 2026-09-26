@@ -190,6 +190,30 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
             local.model.toggleFavorite(option.value as { providerID: string; modelID: string })
           },
         },
+        {
+          command: "model.dialog.target.main",
+          title: "Main model",
+          hidden: target() === "main",
+          onTrigger() {
+            dialog.replace(() => <DialogModel target="main" />)
+          },
+        },
+        {
+          command: "model.dialog.target.sub",
+          title: "Sub model",
+          hidden: target() === "sub",
+          onTrigger() {
+            dialog.replace(() => <DialogModel target="sub" />)
+          },
+        },
+        {
+          command: "model.dialog.target.plan",
+          title: "Plan model",
+          hidden: target() === "plan",
+          onTrigger() {
+            dialog.replace(() => <DialogModel target="plan" />)
+          },
+        },
       ]}
       onFilter={setQuery}
       flat={true}
