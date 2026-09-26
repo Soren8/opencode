@@ -5,7 +5,7 @@ import fuzzysort from "fuzzysort"
 import { createEffect, createMemo, createSignal, type Accessor } from "solid-js"
 import { RunFooterMenu, createFooterMenuState, type RunFooterMenuItem } from "./footer.menu"
 import type { RunFooterTheme } from "./theme"
-import type { FooterQueuedPrompt, FooterSubagentTab, RunCommand, RunInput, RunProvider } from "./types"
+import type { FooterQueuedPrompt, FooterSubagentTab, ModelTarget, RunCommand, RunInput, RunProvider, RunStackRef } from "./types"
 
 type PanelEntry = RunFooterMenuItem & {
   category: string
@@ -13,7 +13,8 @@ type PanelEntry = RunFooterMenuItem & {
 }
 
 type CommandEntry =
-  | (PanelEntry & { action: "model" })
+  | (PanelEntry & { action: "model"; target?: ModelTarget })
+  | (PanelEntry & { action: "stack" })
   | (PanelEntry & { action: "editor" })
   | (PanelEntry & { action: "skill" })
   | (PanelEntry & { action: "queued" })
@@ -339,7 +340,8 @@ export function RunCommandMenuBody(props: {
   variants: Accessor<string[]>
   variantCycle: string
   onClose: () => void
-  onModel: () => void
+  onModel: (target: ModelTarget) => void
+  onStack: () => void
   onEditor: () => void
   onSkill: () => void
   onSubagent: () => void
@@ -404,9 +406,31 @@ export function RunCommandMenuBody(props: {
         : []
     const agent: CommandEntry[] = [
       {
+        action: "stack",
+        category: "Agent",
+        display: "Switch stack",
+        keywords: "stack preset main sub plan combination",
+      },
+      {
         action: "model",
         category: "Agent",
-        display: "Switch model",
+        display: "Switch main model",
+        keywords: "model main orchestrator primary",
+      },
+      {
+        action: "model",
+        target: "sub",
+        category: "Agent",
+        display: "Switch sub model",
+        keywords: "model sub subagent workhorse",
+      },
+      {
+        action: "model",
+        target: "plan",
+        category: "Agent",
+        display: "Switch plan model",
+        keywords: "model plan review",
+      },
       },
       ...(props.queued().length > 0
         ? [
@@ -470,7 +494,12 @@ export function RunCommandMenuBody(props: {
   const menu = createFooterMenuState({ count: () => items().length, limit: PANEL_LIST_ROWS })
   const pick = (item: CommandEntry) => {
     if (item.action === "model") {
-      props.onModel()
+      props.onModel(item.target ?? "main")
+      return
+    }
+
+    if (item.action === "stack") {
+      props.onStack()
       return
     }
 
@@ -951,6 +980,7 @@ export function RunModelSelectBody(props: {
   theme: Accessor<RunFooterTheme>
   providers: Accessor<RunProvider[] | undefined>
   current: Accessor<RunInput["model"]>
+  title?: string
   onClose: () => void
   onSelect: (model: NonNullable<RunInput["model"]>) => void
 }) {
@@ -1037,7 +1067,7 @@ export function RunModelSelectBody(props: {
 
   return (
     <PanelShell
-      title="Select model"
+      title={props.title ?? "Select model"}
       query={query()}
       count={items().length}
       total={entries().length}
@@ -1058,6 +1088,99 @@ export function RunModelSelectBody(props: {
         rows={() => PANEL_LIST_ROWS}
         limit={PANEL_LIST_ROWS}
         empty={props.providers() ? "No results found" : "Models loading"}
+        border={false}
+        paddingLeft={PANEL_PAD}
+        paddingRight={PANEL_PAD}
+        grouped={!query().trim()}
+        background
+        headerColor={props.theme().muted}
+      />
+    </PanelShell>
+  )
+}
+
+type StackEntry = PanelEntry & {
+  name: string
+  current: boolean
+}
+
+function stackRefLabel(ref: RunStackRef | undefined, providers: RunProvider[] | undefined): string | undefined {
+  if (!ref) return undefined
+  const provider = providers?.find((item) => item.id === ref.providerID)
+  const model = provider?.models[ref.modelID]
+  return `${model?.name ?? ref.modelID} · ${provider?.name ?? ref.providerID}`
+}
+
+export function RunStackSelectBody(props: {
+  theme: Accessor<RunFooterTheme>
+  providers: Accessor<RunProvider[] | undefined>
+  stacks: Accessor<Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>>
+  current: Accessor<string | undefined>
+  onClose: () => void
+  onSelect: (name: string) => void
+}) {
+  let field: InputRenderable | undefined
+  const [query, setQuery] = createSignal("")
+  const entries = createMemo<StackEntry[]>(() =>
+    Object.entries(props.stacks() ?? {})
+      .map(([name, def]) => {
+        const main = stackRefLabel(def.main, props.providers())
+        const sub = stackRefLabel(def.sub, props.providers())
+        return {
+          name,
+          category: "Stacks",
+          display: name,
+          footer: props.current() === name ? "current" : main,
+          keywords: `${name} ${main ?? ""} ${sub ?? ""}`,
+          current: props.current() === name,
+        }
+      })
+      .sort((a, b) => a.display.localeCompare(b.display)),
+  )
+  const items = createMemo<StackEntry[]>(() => match(query(), entries()))
+  const menu = createFooterMenuState({ count: () => items().length, limit: PANEL_LIST_ROWS })
+  const select = () => {
+    const item = items()[menu.selected()]
+    if (!item) return
+    props.onSelect(item.name)
+  }
+
+  createEffect(() => {
+    query()
+    menu.reset()
+  })
+
+  useKeyboard((event) => {
+    if (event.defaultPrevented) {
+      return
+    }
+
+    handleKey({ event, menu, field: () => field, setQuery, select, close: props.onClose })
+  })
+
+  return (
+    <PanelShell
+      title="Select stack"
+      query={query()}
+      count={items().length}
+      total={entries().length}
+      placeholder="Search"
+      theme={props.theme}
+      inputRef={(input) => {
+        field = input
+      }}
+      onQuery={setQuery}
+      dark
+      chrome="minimal"
+    >
+      <RunFooterMenu
+        theme={props.theme}
+        items={items}
+        selected={menu.selected}
+        offset={menu.offset}
+        rows={() => PANEL_LIST_ROWS}
+        limit={PANEL_LIST_ROWS}
+        empty="No stacks configured"
         border={false}
         paddingLeft={PANEL_PAD}
         paddingRight={PANEL_PAD}

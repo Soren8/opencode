@@ -182,8 +182,11 @@ export type FooterPromptRoute =
   | { type: "subagent"; sessionID: string }
   | { type: "command" }
   | { type: "skill" }
-  | { type: "model" }
+  | { type: "model"; target?: ModelTarget }
+  | { type: "stack" }
   | { type: "variant" }
+
+export type ModelTarget = "main" | "sub" | "plan"
 
 export type FooterSubagentTab = {
   sessionID: string
@@ -217,6 +220,13 @@ export type FooterOutput = {
   subagent?: FooterSubagentState
 }
 
+// A serializable stack model reference, mirroring StackSelection in
+// stack.shared.ts without importing runtime helpers into the event contract.
+export type RunStackRef = {
+  providerID: string
+  modelID: string
+}
+
 // Typed messages sent to RunFooter.event(). The prompt queue and stream
 // transport both emit these to update footer state without reaching into
 // internal signals directly.
@@ -230,6 +240,11 @@ export type FooterEvent =
   | {
       type: "models"
       providers: RunProvider[]
+    }
+  | {
+      type: "stacks"
+      stacks: Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>
+      current: string | undefined
     }
   | {
       type: "variants"

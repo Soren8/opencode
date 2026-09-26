@@ -18,6 +18,7 @@ import {
   RunModelSelectBody,
   RunQueuedPromptSelectBody,
   RunSkillSelectBody,
+  RunStackSelectBody,
   RunSubagentSelectBody,
   RunVariantSelectBody,
 } from "./footer.command"
@@ -41,6 +42,7 @@ import type {
   FooterState,
   FooterSubagentState,
   FooterView,
+  ModelTarget,
   PermissionReply,
   QuestionReject,
   QuestionReply,
@@ -51,6 +53,7 @@ import type {
   RunPrompt,
   RunProvider,
   RunResource,
+  RunStackRef,
   RunTuiConfig,
 } from "./types"
 import type { RunTheme } from "./theme"
@@ -80,6 +83,11 @@ type RunFooterViewProps = {
   commands: () => RunCommand[] | undefined
   providers: () => RunProvider[] | undefined
   currentModel: () => RunInput["model"]
+  currentSubModel?: () => RunInput["model"]
+  currentPlanModel?: () => RunInput["model"]
+  stackName?: () => string | undefined
+  stacks?: () => Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>
+  modelTarget?: () => ModelTarget
   variants: () => string[]
   currentVariant: () => string | undefined
   state: () => FooterState
@@ -105,6 +113,8 @@ type RunFooterViewProps = {
   onRequestExit?: (fn: (() => boolean) | undefined) => void
   onExit: () => void
   onModelSelect: (model: NonNullable<RunInput["model"]>) => void
+  onModelTarget?: (target: ModelTarget) => void
+  onStackSelect?: (name: string) => void
   onVariantSelect: (variant: string | undefined) => void
   onRows: (rows: number) => void
   onLayout: (input: { route: FooterPromptRoute; autocomplete: boolean; subagentRows: number }) => void
@@ -141,6 +151,7 @@ export function RunFooterView(props: RunFooterViewProps) {
   const commanding = createMemo(() => active().type === "prompt" && route().type === "command")
   const skilling = createMemo(() => active().type === "prompt" && route().type === "skill")
   const modeling = createMemo(() => active().type === "prompt" && route().type === "model")
+  const stacking = createMemo(() => active().type === "prompt" && route().type === "stack")
   const varianting = createMemo(() => active().type === "prompt" && route().type === "variant")
   const panel = createMemo(
     () =>
@@ -151,6 +162,7 @@ export function RunFooterView(props: RunFooterViewProps) {
       commanding() ||
       skilling() ||
       modeling() ||
+      stacking() ||
       varianting(),
   )
   const selected = createMemo(() => {
@@ -168,6 +180,9 @@ export function RunFooterView(props: RunFooterViewProps) {
 
     return tabs().findIndex((item) => item.sessionID === sessionID) + 1
   })
+  const target = createMemo(() => props.modelTarget?.() ?? "main")
+  const stacks = createMemo(() => props.stacks?.() ?? {})
+  const stackName = createMemo(() => props.stackName?.())
   const foregroundSubagents = createMemo(
     () => props.backgroundSubagents && activeTabs().some((item) => !item.background),
   )
@@ -292,8 +307,14 @@ export function RunFooterView(props: RunFooterViewProps) {
     props.onSubagentSelect?.(undefined)
   }
 
-  const openModel = () => {
-    setRoute({ type: "model" })
+  const openModel = (target: ModelTarget = "main") => {
+    props.onModelTarget?.(target)
+    setRoute({ type: "model", target })
+    props.onSubagentSelect?.(undefined)
+  }
+
+  const openStack = () => {
+    setRoute({ type: "stack" })
     props.onSubagentSelect?.(undefined)
   }
 
@@ -603,6 +624,7 @@ export function RunFooterView(props: RunFooterViewProps) {
       current.type !== "command" &&
       current.type !== "skill" &&
       current.type !== "model" &&
+      current.type !== "stack" &&
       current.type !== "variant" &&
       current.type !== "queued-menu" &&
       current.type !== "subagent-menu"
@@ -712,6 +734,7 @@ export function RunFooterView(props: RunFooterViewProps) {
                             variantCycle={variantCycle()}
                             onClose={closePanel}
                             onModel={openModel}
+                            onStack={openStack}
                             onEditor={() => {
                               closePanel()
                               void composer.openEditor()
@@ -757,10 +780,36 @@ export function RunFooterView(props: RunFooterViewProps) {
                           <RunModelSelectBody
                             theme={theme}
                             providers={props.providers}
-                            current={props.currentModel}
+                            current={
+                              target() === "sub"
+                                ? (props.currentSubModel ?? props.currentModel)
+                                : target() === "plan"
+                                  ? (props.currentPlanModel ?? props.currentModel)
+                                  : props.currentModel
+                            }
+                            title={
+                              target() === "sub"
+                                ? "Select sub model"
+                                : target() === "plan"
+                                  ? "Select plan model"
+                                  : "Select main model"
+                            }
                             onClose={closePanel}
                             onSelect={(model) => {
                               props.onModelSelect(model)
+                              closePanel()
+                            }}
+                          />
+                        </Match>
+                        <Match when={stacking()}>
+                          <RunStackSelectBody
+                            theme={theme}
+                            providers={props.providers}
+                            stacks={stacks}
+                            current={stackName}
+                            onClose={closePanel}
+                            onSelect={(name) => {
+                              props.onStackSelect?.(name)
                               closePanel()
                             }}
                           />

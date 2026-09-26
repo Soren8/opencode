@@ -16,6 +16,7 @@ import { ConfigPluginV1 } from "./plugin"
 import { ConfigProviderV1 } from "./provider"
 import { ConfigServerV1 } from "./server"
 import { ConfigSkillsV1 } from "./skills"
+import { ConfigStackV1 } from "./stack"
 
 export type Layout = ConfigLayoutV1.Layout
 
@@ -80,6 +81,12 @@ export const Info = Schema.Struct({
   default_agent: Schema.optional(Schema.String).annotate({
     description:
       "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",
+  }),
+  stack: Schema.optional(Schema.Record(Schema.String, ConfigStackV1.Info)).annotate({
+    description: "Named model stacks (main + sub agent combinations), see https://opencode.ai/docs/stacks",
+  }),
+  default_stack: Schema.optional(Schema.String).annotate({
+    description: "Default stack to use when none is selected. Must match a key in 'stack'.",
   }),
   subagent_depth: Schema.optional(NonNegativeInt).annotate({
     description: "Maximum subagent nesting depth. Defaults to 1, which prevents subagents from launching subagents.",

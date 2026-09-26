@@ -21,6 +21,7 @@ import { entrySplash, exitSplash, splashMeta } from "./splash"
 import { resolveRunTheme } from "./theme"
 import type {
   FooterApi,
+  ModelTarget,
   PermissionReply,
   QuestionReject,
   QuestionReply,
@@ -28,9 +29,10 @@ import type {
   RunInput,
   RunPrompt,
   RunResource,
+  RunStackRef,
   RunTuiConfig,
 } from "./types"
-import { formatModelLabel } from "./variant.shared"
+import { formatStackLabel } from "./stack.shared"
 
 const FOOTER_HEIGHT = 4
 
@@ -44,6 +46,11 @@ type CycleResult = {
   status?: string
   variant?: string | undefined
   variants?: string[]
+}
+
+type StackResult = {
+  modelLabel?: string
+  status?: string
 }
 
 type FooterLabels = {
@@ -63,6 +70,10 @@ export type LifecycleInput = {
   history: RunPrompt[]
   agent: string | undefined
   model: RunInput["model"]
+  subModel: RunInput["model"]
+  planModel: RunInput["model"]
+  stackName: string | undefined
+  stacks: Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>
   variant: string | undefined
   tuiConfig: RunTuiConfig
   backgroundSubagents: boolean
@@ -70,7 +81,11 @@ export type LifecycleInput = {
   onQuestionReply: (input: QuestionReply) => void | Promise<void>
   onQuestionReject: (input: QuestionReject) => void | Promise<void>
   onCycleVariant?: () => CycleResult | void
-  onModelSelect?: (model: NonNullable<RunInput["model"]>) => CycleResult | void | Promise<CycleResult | void>
+  onModelSelect?: (
+    model: NonNullable<RunInput["model"]>,
+    target: ModelTarget,
+  ) => CycleResult | void | Promise<CycleResult | void>
+  onStackSelect?: (name: string) => StackResult | void | Promise<StackResult | void>
   onVariantSelect?: (variant: string | undefined) => CycleResult | void | Promise<CycleResult | void>
   onInterrupt?: () => void
   onBackground?: () => void
@@ -121,7 +136,7 @@ function splashInfo(title: string | undefined, history: RunPrompt[]) {
   }
 }
 
-function footerLabels(input: Pick<RunInput, "agent" | "model" | "variant">): FooterLabels {
+function footerLabels(input: Pick<RunInput, "agent" | "model" | "variant"> & { subModel?: RunInput["model"] }): FooterLabels {
   const agentLabel = Locale.titlecase(input.agent ?? "build")
 
   if (!input.model) {
@@ -133,7 +148,7 @@ function footerLabels(input: Pick<RunInput, "agent" | "model" | "variant">): Foo
 
   return {
     agentLabel,
-    modelLabel: formatModelLabel(input.model, input.variant),
+    modelLabel: formatStackLabel(input.model, input.subModel, input.variant, undefined),
   }
 }
 
@@ -209,6 +224,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
     const labels = footerLabels({
       agent: input.agent,
       model: input.model,
+      subModel: input.subModel,
       variant: input.variant,
     })
     const footerTask = import("./footer")
@@ -237,6 +253,10 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
       sessionID: input.getSessionID ?? (() => input.sessionID),
       ...labels,
       model: input.model,
+      subModel: input.subModel,
+      planModel: input.planModel,
+      stackName: input.stackName,
+      stacks: input.stacks,
       variant: input.variant,
       first: input.first,
       history: input.history,
@@ -251,6 +271,7 @@ export async function createRuntimeLifecycle(input: LifecycleInput): Promise<Lif
       onQuestionReject: input.onQuestionReject,
       onCycleVariant: input.onCycleVariant,
       onModelSelect: input.onModelSelect,
+      onStackSelect: input.onStackSelect,
       onVariantSelect: input.onVariantSelect,
       onInterrupt: input.onInterrupt,
       onBackground: input.onBackground,

@@ -7,6 +7,7 @@ import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
+import { Stack } from "../stack/stack"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
@@ -82,6 +83,7 @@ export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
     const agent = yield* Agent.Service
+    const stack = yield* Stack.Service
     const background = yield* BackgroundJob.Service
     const config = yield* Config.Service
     const sessions = yield* Session.Service
@@ -159,6 +161,7 @@ export const TaskTool = Tool.define(
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
           agent: next.name,
+          metadata: parent.metadata,
           permission: [
             ...childPermission,
             ...childToolDenies.filter(
@@ -178,7 +181,8 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
+      const stackSub = yield* stack.resolve(parent.metadata, "sub")
+      const model = next.model ?? stackSub ?? {
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
@@ -206,7 +210,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant: (next.model ?? stackSub) ? undefined : variant,
           agent: next.name,
           parts,
         })

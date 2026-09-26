@@ -45,6 +45,8 @@ import type {
   FooterQueuedPrompt,
   FooterState,
   FooterSubagentState,
+  ModelTarget,
+  RunStackRef,
   FooterView,
   PermissionReply,
   QuestionReject,
@@ -67,6 +69,11 @@ type CycleResult = {
   variants?: string[]
 }
 
+type StackResult = {
+  modelLabel?: string
+  status?: string
+}
+
 type RunFooterOptions = {
   directory: string
   findFiles: (query: string) => Promise<string[]>
@@ -78,6 +85,10 @@ type RunFooterOptions = {
   agentLabel: string
   modelLabel: string
   model: RunInput["model"]
+  subModel?: RunInput["model"]
+  planModel?: RunInput["model"]
+  stackName?: string
+  stacks?: Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>
   variant: string | undefined
   first: boolean
   history?: RunPrompt[]
@@ -90,7 +101,11 @@ type RunFooterOptions = {
   onQuestionReply: (input: QuestionReply) => void | Promise<void>
   onQuestionReject: (input: QuestionReject) => void | Promise<void>
   onCycleVariant?: () => CycleResult | void
-  onModelSelect?: (model: NonNullable<RunInput["model"]>) => CycleResult | void | Promise<CycleResult | void>
+  onModelSelect?: (
+    model: NonNullable<RunInput["model"]>,
+    target: ModelTarget,
+  ) => CycleResult | void | Promise<CycleResult | void>
+  onStackSelect?: (name: string) => StackResult | void | Promise<StackResult | void>
   onVariantSelect?: (variant: string | undefined) => CycleResult | void | Promise<CycleResult | void>
   onInterrupt?: () => void
   onBackground?: () => void
@@ -188,6 +203,16 @@ export class RunFooter implements FooterApi {
   private setProviders: Setter<RunProvider[] | undefined>
   private currentModel: Accessor<RunInput["model"]>
   private setCurrentModel: Setter<RunInput["model"]>
+  private currentSubModel: Accessor<RunInput["model"]>
+  private setCurrentSubModel: Setter<RunInput["model"]>
+  private currentPlanModel: Accessor<RunInput["model"]>
+  private setCurrentPlanModel: Setter<RunInput["model"]>
+  private stackName: Accessor<string | undefined>
+  private setStackName: Setter<string | undefined>
+  private stacks: Accessor<Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>>
+  private setStacks: Setter<Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>>
+  private modelTarget: Accessor<ModelTarget>
+  private setModelTarget: Setter<ModelTarget>
   private variants: Accessor<string[]>
   private setVariants: Setter<string[]>
   private currentVariant: Accessor<string | undefined>
@@ -267,6 +292,23 @@ export class RunFooter implements FooterApi {
     const [currentModel, setCurrentModel] = createSignal<RunInput["model"]>(options.model)
     this.currentModel = currentModel
     this.setCurrentModel = setCurrentModel
+    const [currentSubModel, setCurrentSubModel] = createSignal<RunInput["model"]>(options.subModel)
+    this.currentSubModel = currentSubModel
+    this.setCurrentSubModel = setCurrentSubModel
+    const [currentPlanModel, setCurrentPlanModel] = createSignal<RunInput["model"]>(options.planModel)
+    this.currentPlanModel = currentPlanModel
+    this.setCurrentPlanModel = setCurrentPlanModel
+    const [stackName, setStackName] = createSignal<string | undefined>(options.stackName)
+    this.stackName = stackName
+    this.setStackName = setStackName
+    const [stacks, setStacks] = createSignal<
+      Record<string, { name?: string; main?: RunStackRef; sub?: RunStackRef; plan?: RunStackRef }>
+    >(options.stacks ?? {})
+    this.stacks = stacks
+    this.setStacks = setStacks
+    const [modelTarget, setModelTarget] = createSignal<ModelTarget>("main")
+    this.modelTarget = modelTarget
+    this.setModelTarget = setModelTarget
     const [variants, setVariants] = createSignal<string[]>([])
     this.variants = variants
     this.setVariants = setVariants
@@ -315,6 +357,11 @@ export class RunFooter implements FooterApi {
               commands: footer.commands,
               providers: footer.providers,
               currentModel: footer.currentModel,
+              currentSubModel: footer.currentSubModel,
+              currentPlanModel: footer.currentPlanModel,
+              stackName: footer.stackName,
+              stacks: footer.stacks,
+              modelTarget: footer.modelTarget,
               variants: footer.variants,
               currentVariant: footer.currentVariant,
               theme: footer.theme,
@@ -336,6 +383,8 @@ export class RunFooter implements FooterApi {
               onRequestExit: footer.setRequestExitHandler,
               onExit: () => footer.close(),
               onModelSelect: footer.handleModelSelect,
+              onModelTarget: footer.handleModelTarget,
+              onStackSelect: footer.handleStackSelect,
               onVariantSelect: footer.handleVariantSelect,
               onRows: footer.syncRows,
               onLayout: footer.syncLayout,
@@ -434,6 +483,16 @@ export class RunFooter implements FooterApi {
 
       this.setVariants(next.variants)
       this.setCurrentVariant(next.current)
+      return
+    }
+
+    if (next.type === "stacks") {
+      if (this.isGone) {
+        return
+      }
+
+      this.setStacks(next.stacks)
+      this.setStackName(next.current)
       return
     }
 
@@ -816,18 +875,52 @@ export class RunFooter implements FooterApi {
     this.setNotice(result.status ?? "variant updated")
   }
 
+  private handleModelTarget = (target: ModelTarget): void => {
+    this.setModelTarget(target)
+  }
+
   private handleModelSelect = (model: NonNullable<RunInput["model"]>): void => {
     if (this.isClosed) {
       return
     }
 
+    const target = this.modelTarget()
+    if (target === "sub") {
+      this.setCurrentSubModel(model)
+      this.setStackName(undefined)
+      void Promise.resolve()
+        .then(() => this.options.onModelSelect?.(model, target))
+        .then((result) => {
+          if (!result || this.isClosed) return
+          if (result.modelLabel) this.patch({ model: result.modelLabel })
+          if (result.status) this.setNotice(result.status)
+        })
+        .catch(() => {})
+      return
+    }
+
+    if (target === "plan") {
+      this.setCurrentPlanModel(model)
+      this.setStackName(undefined)
+      void Promise.resolve()
+        .then(() => this.options.onModelSelect?.(model, target))
+        .then((result) => {
+          if (!result || this.isClosed) return
+          if (result.modelLabel) this.patch({ model: result.modelLabel })
+          if (result.status) this.setNotice(result.status)
+        })
+        .catch(() => {})
+      return
+    }
+
     const previous = this.currentModel()
     this.setCurrentModel(model)
+    this.setStackName(undefined)
     if (!previous || previous.providerID !== model.providerID || previous.modelID !== model.modelID) {
       this.setCurrentVariant(undefined)
     }
     void Promise.resolve()
-      .then(() => this.options.onModelSelect?.(model))
+      .then(() => this.options.onModelSelect?.(model, target))
       .then((result) => {
         const current = this.currentModel()
         if (
@@ -859,6 +952,29 @@ export class RunFooter implements FooterApi {
         if (result.status) {
           this.setNotice(result.status)
         }
+      })
+      .catch(() => {})
+  }
+
+  private handleStackSelect = (name: string): void => {
+    if (this.isClosed) {
+      return
+    }
+
+    const def = this.stacks()[name]
+    if (def?.main) this.setCurrentModel({ providerID: def.main.providerID, modelID: def.main.modelID })
+    if (def?.sub) this.setCurrentSubModel({ providerID: def.sub.providerID, modelID: def.sub.modelID })
+    else this.setCurrentSubModel(undefined)
+    if (def?.plan) this.setCurrentPlanModel({ providerID: def.plan.providerID, modelID: def.plan.modelID })
+    else this.setCurrentPlanModel(undefined)
+    this.setStackName(name)
+    this.setCurrentVariant(undefined)
+    void Promise.resolve()
+      .then(() => this.options.onStackSelect?.(name))
+      .then((result) => {
+        if (!result || this.isClosed) return
+        if (result.modelLabel) this.patch({ model: result.modelLabel })
+        if (result.status) this.setNotice(result.status)
       })
       .catch(() => {})
   }

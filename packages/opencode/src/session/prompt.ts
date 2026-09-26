@@ -9,6 +9,7 @@ import { SessionRevert } from "./revert"
 import { Session } from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
+import { Stack } from "../stack/stack"
 
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
@@ -117,6 +118,7 @@ const layer = Layer.effect(
     const sessions = yield* Session.Service
     const agents = yield* Agent.Service
     const provider = yield* Provider.Service
+    const stack = yield* Stack.Service
     const processor = yield* SessionProcessor.Service
     const compaction = yield* SessionCompaction.Service
     const plugin = yield* Plugin.Service
@@ -643,7 +645,11 @@ const layer = Layer.effect(
         throw error
       }
 
-      const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
+      const existing = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      const stackModel = yield* stack
+        .resolve(existing.metadata, ag.name === "plan" ? "plan" : "main")
+        .pipe(Effect.orDie)
+      const model = input.model ?? ag.model ?? stackModel ?? (yield* currentModel(input.sessionID))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.variant && ag.variant && same
@@ -669,7 +675,7 @@ const layer = Layer.effect(
         format: input.format,
       }
 
-      const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      const current = existing
       if (
         current.agent !== info.agent ||
         current.model?.providerID !== info.model.providerID ||
@@ -1621,6 +1627,7 @@ export const node = LayerNode.make({
     SessionRevert.node,
     SessionSummary.node,
     SystemPrompt.node,
+    Stack.node,
     LLM.node,
     EventV2Bridge.node,
     RuntimeFlags.node,

@@ -969,6 +969,7 @@ export function createPromptState(input: PromptInput): PromptState {
     if (current === "command") return false
     if (current === "skill") return false
     if (current === "model") return false
+    if (current === "stack") return false
     if (current === "variant") return false
     if (current === "queued-menu") return false
     if (current === "subagent-menu") return false

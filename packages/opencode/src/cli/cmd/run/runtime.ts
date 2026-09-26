@@ -19,7 +19,18 @@ import { createRunDemo } from "./demo"
 import { resolveModelInfo, resolveRunTuiConfig, resolveSessionInfo } from "./runtime.boot"
 import { createRuntimeLifecycle } from "./runtime.lifecycle"
 import { trace } from "./trace"
-import { cycleVariant, formatModelLabel, resolveSavedVariant, resolveVariant, saveVariant } from "./variant.shared"
+import { cycleVariant, resolveSavedVariant, resolveVariant, saveVariant } from "./variant.shared"
+import {
+  applyStackDefinition,
+  formatStackLabel,
+  loadSavedStack,
+  pushStackToSession,
+  resolveInitialStack,
+  resolveStackDefinitions,
+  saveStackSelection,
+  type StackDefinitions,
+  type StackSelection,
+} from "./stack.shared"
 import type { LocalReplayAnchor, LocalReplayRow, RunInput, RunPrompt, RunProvider, StreamCommit } from "./types"
 
 /** @internal Exported for testing */
@@ -120,6 +131,11 @@ type RuntimeState = {
   shown: boolean
   aborting: boolean
   model: RunInput["model"]
+  subModel: RunInput["model"]
+  planModel: RunInput["model"]
+  stackName: string | undefined
+  stacks: StackDefinitions
+  stackDirty: boolean
   providers: RunProvider[]
   variants: string[]
   limits: Record<string, number>
@@ -193,11 +209,33 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
           variant: undefined,
         })
   const savedTask = resolveSavedVariant(ctx.model)
-  const [tuiConfig, session, savedVariant] = await Promise.all([tuiConfigTask, sessionTask, savedTask])
+  const stackTask = (async () => {
+    const [config, saved] = await Promise.all([
+      ctx.sdk.config
+        ?.get({ directory: ctx.directory })
+        .then((x) => x.data)
+        .catch(() => undefined),
+      loadSavedStack(),
+    ])
+    const stacks = resolveStackDefinitions(config)
+    const selection = resolveInitialStack({ model: ctx.model, saved, definitions: stacks })
+    return { stacks, selection }
+  })()
+  const [tuiConfig, session, savedVariant, stackBoot] = await Promise.all([
+    tuiConfigTask,
+    sessionTask,
+    savedTask,
+    stackTask,
+  ])
   const state: RuntimeState = {
     shown: !session.first,
     aborting: false,
-    model: ctx.model,
+    model: stackBoot.selection.main,
+    subModel: stackBoot.selection.sub,
+    planModel: stackBoot.selection.plan,
+    stackName: stackBoot.selection.name,
+    stacks: stackBoot.stacks,
+    stackDirty: true,
     providers: [],
     variants: [],
     limits: {},
@@ -241,6 +279,15 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     history: session.history,
     agent: state.agent,
     model: state.model,
+    subModel: state.subModel,
+    planModel: state.planModel,
+    stackName: state.stackName,
+    stacks: Object.fromEntries(
+      Object.entries(state.stacks.stacks).map(([name, def]) => [
+        name,
+        { name: def.name, main: def.main, sub: def.sub, plan: def.plan },
+      ]),
+    ),
     variant: state.activeVariant,
     tuiConfig,
     backgroundSubagents: input.backgroundSubagents,
@@ -277,11 +324,35 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       saveVariant(state.model, state.activeVariant)
       return {
         status: state.activeVariant ? `variant ${state.activeVariant}` : "variant default",
-        modelLabel: formatModelLabel(state.model, state.activeVariant, state.providers),
+        modelLabel: formatStackLabel(state.model, state.subModel, state.activeVariant, state.providers),
         variant: state.activeVariant,
       }
     },
-    onModelSelect: async (model) => {
+    onModelSelect: async (model, target) => {
+      // Sub/plan layers only affect routing + session metadata. Variants
+      // stay on the main model so effort levels never leak into workhorses.
+      if (target === "sub") {
+        state.subModel = model
+        state.stackName = undefined
+        state.stackDirty = true
+        saveStackSelection({ main: state.model, sub: state.subModel, plan: state.planModel })
+        return {
+          modelLabel: formatStackLabel(state.model, state.subModel, state.activeVariant, state.providers),
+          status: `sub model ${model.modelID}`,
+        }
+      }
+
+      if (target === "plan") {
+        state.planModel = model
+        state.stackName = undefined
+        state.stackDirty = true
+        saveStackSelection({ main: state.model, sub: state.subModel, plan: state.planModel })
+        return {
+          modelLabel: formatStackLabel(state.model, state.subModel, state.activeVariant, state.providers),
+          status: `plan model ${model.modelID}`,
+        }
+      }
+
       if (state.model?.providerID === model.providerID && state.model.modelID === model.modelID) {
         return
       }
@@ -308,9 +379,46 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         return
       }
 
+      state.stackName = undefined
+      state.stackDirty = true
+      saveStackSelection({ main: state.model, sub: state.subModel, plan: state.planModel })
       return {
-        modelLabel: formatModelLabel(model, state.activeVariant, state.providers),
+        modelLabel: formatStackLabel(model, state.subModel, state.activeVariant, state.providers),
         status: `model ${model.modelID}`,
+        variant: state.activeVariant,
+        variants: state.variants,
+      }
+    },
+    onStackSelect: async (name) => {
+      const selection = applyStackDefinition(name, state.stacks)
+      if (!selection) {
+        return {
+          status: `stack ${name} unavailable`,
+        }
+      }
+
+      state.stackName = selection.name
+      state.model = selection.main
+      state.subModel = selection.sub
+      state.planModel = selection.plan
+      state.activeVariant = undefined
+      state.variants = variantsFor(state.providers, selection.main)
+      state.stackDirty = true
+      saveStackSelection({ name, main: selection.main, sub: selection.sub, plan: selection.plan })
+      const switching = selection.main
+        ? resolveSavedVariant(selection.main).then((saved) => {
+            state.activeVariant = resolveVariant(ctx.variant, undefined, saved, state.variants)
+          })
+        : Promise.resolve()
+      state.switching = switching
+      await switching
+      if (state.switching === switching) {
+        state.switching = undefined
+      }
+
+      return {
+        modelLabel: formatStackLabel(state.model, state.subModel, state.activeVariant, state.providers),
+        status: `stack ${name}`,
         variant: state.activeVariant,
         variants: state.variants,
       }
@@ -332,7 +440,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       saveVariant(state.model, state.activeVariant)
       return {
         status: state.activeVariant ? `variant ${state.activeVariant}` : "variant default",
-        modelLabel: formatModelLabel(state.model, state.activeVariant, state.providers),
+        modelLabel: formatStackLabel(state.model, state.subModel, state.activeVariant, state.providers),
         variant: state.activeVariant,
         variants: state.variants,
       }
@@ -442,6 +550,16 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     }
 
     footer.event({ type: "models", providers: info.providers })
+    footer.event({
+      type: "stacks",
+      stacks: Object.fromEntries(
+        Object.entries(state.stacks.stacks).map(([name, def]) => [
+          name,
+          { name: def.name, main: def.main, sub: def.sub, plan: def.plan },
+        ]),
+      ),
+      current: state.stackName,
+    })
     footer.event({ type: "variants", variants: state.variants, current: state.activeVariant })
     if (!state.model) {
       return
@@ -449,7 +567,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
 
     footer.event({
       type: "model",
-      model: formatModelLabel(state.model, state.activeVariant, state.providers),
+      model: formatStackLabel(state.model, state.subModel, state.activeVariant, state.providers),
     })
   })
 
@@ -580,6 +698,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
               state.history = []
               state.localRows = []
               includeFiles = true
+              state.stackDirty = true
               state.demo = input.demo
                 ? createRunDemo({
                     footer,
@@ -644,13 +763,31 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
 
         await state.switching?.catch(() => {})
 
+        // Push the active stack to session metadata once per session so the
+        // server resolves sub/plan models for Task subagents. Best-effort:
+        // primary prompts already carry the right model explicitly. Skipped
+        // entirely when no stack is active.
+        if (state.stackDirty && hasSession(input, state)) {
+          state.stackDirty = false
+          if (state.stackName ?? state.subModel ?? state.planModel) {
+            const selection: StackSelection = {
+              ...(state.stackName ? { name: state.stackName } : {}),
+              main: state.model ?? undefined,
+              sub: state.subModel ?? undefined,
+              plan: state.planModel ?? undefined,
+            }
+            await pushStackToSession(ctx.sdk, state.sessionID, selection).catch(() => {})
+          }
+        }
+
         let outputAnchor: LocalReplayAnchor | undefined
         try {
           const next = await ensureStream()
+          const planTurn = state.agent === "plan"
           await next.handle.runPromptTurn({
             agent: state.agent,
-            model: state.model,
-            variant: state.activeVariant,
+            model: planTurn ? (state.planModel ?? state.model) : state.model,
+            variant: planTurn ? undefined : state.activeVariant,
             prompt,
             files: input.files,
             includeFiles,

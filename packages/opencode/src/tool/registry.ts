@@ -10,6 +10,7 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
+import { Stack } from "@/stack/stack"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
@@ -449,6 +450,7 @@ export const node = LayerNode.make({
     MCP.node,
     Database.node,
     Ripgrep.node,
+    Stack.node,
   ],
 })
 

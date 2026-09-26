@@ -374,6 +374,30 @@ You can configure the providers and models you want to use in your OpenCode conf
 
 The `small_model` option configures a separate model for lightweight tasks like title generation. By default, OpenCode tries to use a cheaper model if one is available from your provider, otherwise it falls back to your main model.
 
+### Stacks
+
+Stacks are named Main + Sub agent combinations you can hop between without editing config. Each stack sets a `main` orchestrator model, a `sub` workhorse model for all subagents without an explicit `agent.model`, and an optional `plan` model for plan mode (defaults to `main`).
+
+```json title="opencode.json"
+{
+  "$schema": "https://opencode.ai/config.json",
+  "stack": {
+    "cheap": {
+      "main": "opencode/glm-4.7",
+      "sub": "opencode/glm-4.7",
+      "plan": "anthropic/claude-opus-4-6"
+    },
+    "max": {
+      "main": "anthropic/claude-opus-4-6",
+      "sub": "opencode/glm-4.7"
+    }
+  },
+  "default_stack": "cheap"
+}
+```
+
+Switch stacks with the `Switch stack` command, or tweak one layer with `Switch main/sub/plan model`. The active stack persists across sessions and applies to new subagents; agents with an explicit `model` always keep it.
+
 Provider options can include `timeout`, `headerTimeout`, `chunkTimeout`, and `setCacheKey`:
 
 ```json title="opencode.json"
