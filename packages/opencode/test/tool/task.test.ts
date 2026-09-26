@@ -17,6 +17,7 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import { Stack } from "@/stack/stack"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -48,6 +49,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       SessionStatus.node,
       Truncate.node,
       ToolRegistry.node,
+      Stack.node,
       Database.node,
       RuntimeFlags.node,
       Ripgrep.node,
