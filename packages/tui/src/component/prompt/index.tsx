@@ -210,7 +210,12 @@ export function Prompt(props: PromptProps) {
   const workspace = usePromptWorkspace(props.sessionID)
   const move = usePromptMove({ projectID: project.project, sessionID: () => props.sessionID })
   const [cursorVersion, setCursorVersion] = createSignal(0)
-  const currentProviderLabel = createMemo(() => footerParsed().provider)
+  const lastUserMessage = createMemo(() => {
+    if (!props.sessionID) return undefined
+    const messages = sync.data.message[props.sessionID]
+    if (!messages) return undefined
+    return messages.findLast((m): m is UserMessage => m.role === "user")
+  })
   // Prefer the viewed session's own recorded model: subagent sessions never
   // sync into the global per-agent store, so without this the footer would
   // show the parent session's model here instead of what actually ran.
@@ -243,6 +248,7 @@ export function Prompt(props: PromptProps) {
     if (variant && variant !== "default") return variant
     return local.model.variant.current()
   })
+  const currentProviderLabel = createMemo(() => footerParsed().provider)
   const stackLabel = createMemo(() => {
     const sel = local.stack.selection()
     if (sel.name) return sel.name
@@ -290,13 +296,6 @@ export function Prompt(props: PromptProps) {
     if (props.disabled) input.cursorColor = theme.backgroundElement
     if (!props.disabled) input.cursorColor = theme.text
     if (tuiConfig.cursor) input.cursorStyle = tuiConfig.cursor
-  })
-
-  const lastUserMessage = createMemo(() => {
-    if (!props.sessionID) return undefined
-    const messages = sync.data.message[props.sessionID]
-    if (!messages) return undefined
-    return messages.findLast((m): m is UserMessage => m.role === "user")
   })
 
   const usage = createMemo(() => {

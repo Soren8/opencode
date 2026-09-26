@@ -7,6 +7,56 @@ import { Global } from "@opencode-ai/core/global"
 import { createTuiResolvedConfig } from "./fixture/tui-runtime"
 import { createEventSource, createFetch, directory, json } from "./fixture/tui-sdk"
 
+test("home prompt renders its model footer without a session", async () => {
+  const setup = await createTestRenderer({ width: 100, height: 32, useThread: false })
+  const core = await import("@opentui/core")
+  mock.module("@opentui/core", () => ({ ...core, createCliRenderer: async () => setup.renderer }))
+  const events = createEventSource()
+  const calls = createFetch((url) => {
+    if (url.pathname === "/config/providers")
+      return json({ providers: [{ id: "test", name: "Test provider", models: {} }], default: {} })
+    if (url.pathname === "/provider")
+      return json({ all: [{ id: "test", name: "Test provider", models: {} }], default: {}, connected: ["test"] })
+    if (url.pathname === "/agent") return json([{ name: "build", mode: "primary", permission: [] }])
+  })
+  const ready = Promise.withResolvers<void>()
+  const { run } = await import("../src/app")
+  const task = Effect.runPromise(
+    run({
+      url: "http://test",
+      directory,
+      config: createTuiResolvedConfig({ plugin_enabled: {} }),
+      fetch: calls.fetch,
+      events: events.source,
+      args: {},
+      pluginHost: {
+        async start(input) {
+          input.runtime.setupSlots(input.api)
+          ready.resolve()
+        },
+        async dispose() {},
+      },
+    }).pipe(Effect.provide(AppNodeBuilder.build(Global.node))),
+  )
+
+  try {
+    await ready.promise
+    await Bun.sleep(25)
+    await setup.renderOnce()
+    await setup.renderOnce()
+
+    const frame = setup.captureCharFrame()
+    expect(frame).not.toContain("opencode crashed")
+    expect(frame).toContain("No provider selected")
+    expect(frame).toContain("Connect a provider")
+  } finally {
+    process.emit("SIGHUP")
+    await task
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy()
+    mock.restore()
+  }
+})
+
 test("SIGHUP clears title and disposes scoped resources once", async () => {
   const setup = await createTestRenderer({ width: 80, height: 24, useThread: false })
   const core = await import("@opentui/core")
