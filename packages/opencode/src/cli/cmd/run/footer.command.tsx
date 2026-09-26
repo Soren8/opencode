@@ -431,7 +431,6 @@ export function RunCommandMenuBody(props: {
         display: "Switch plan model",
         keywords: "model plan review",
       },
-      },
       ...(props.queued().length > 0
         ? [
             {
