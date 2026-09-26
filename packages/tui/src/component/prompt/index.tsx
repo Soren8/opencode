@@ -210,7 +210,39 @@ export function Prompt(props: PromptProps) {
   const workspace = usePromptWorkspace(props.sessionID)
   const move = usePromptMove({ projectID: project.project, sessionID: () => props.sessionID })
   const [cursorVersion, setCursorVersion] = createSignal(0)
-  const currentProviderLabel = createMemo(() => local.model.parsed().provider)
+  const currentProviderLabel = createMemo(() => footerParsed().provider)
+  // Prefer the viewed session's own recorded model: subagent sessions never
+  // sync into the global per-agent store, so without this the footer would
+  // show the parent session's model here instead of what actually ran.
+  const footerModel = createMemo(() => {
+    const msg = lastUserMessage()
+    if (msg?.model?.providerID && msg?.model?.modelID) {
+      return { providerID: msg.model.providerID, modelID: msg.model.modelID }
+    }
+    return local.model.current()
+  })
+  const footerParsed = createMemo(() => {
+    const value = footerModel()
+    if (!value) {
+      return {
+        provider: "Connect a provider",
+        model: "No provider selected",
+        reasoning: false,
+      }
+    }
+    const provider = sync.data.provider.find((item) => item.id === value.providerID)
+    const info = provider?.models[value.modelID]
+    return {
+      provider: provider?.name ?? value.providerID,
+      model: info?.name ?? value.modelID,
+      reasoning: info?.capabilities?.reasoning ?? false,
+    }
+  })
+  const footerVariant = createMemo(() => {
+    const variant = lastUserMessage()?.model?.variant
+    if (variant && variant !== "default") return variant
+    return local.model.variant.current()
+  })
   const stackLabel = createMemo(() => {
     const sel = local.stack.selection()
     if (sel.name) return sel.name
@@ -1303,6 +1335,8 @@ export function Prompt(props: PromptProps) {
   })
 
   const showVariant = createMemo(() => {
+    const sessionVariant = lastUserMessage()?.model?.variant
+    if (sessionVariant && sessionVariant !== "default") return true
     const variants = local.model.variant.list()
     if (variants.length === 0) return false
     const current = local.model.variant.current()
@@ -1468,14 +1502,14 @@ export function Prompt(props: PromptProps) {
                             flexShrink={0}
                             fg={fadeColor(leader() ? theme.textMuted : theme.text, modelMetaAlpha())}
                           >
-                            {local.model.parsed().model}
+                            {footerParsed().model}
                           </text>
                           <text fg={fadeColor(theme.textMuted, modelMetaAlpha())}>{currentProviderLabel()}</text>
                           <Show when={showVariant()}>
                             <text fg={fadeColor(theme.textMuted, variantMetaAlpha())}>·</text>
                             <text>
                               <span style={{ fg: fadeColor(theme.warning, variantMetaAlpha()), bold: true }}>
-                                {local.model.variant.current()}
+                                {footerVariant()}
                               </span>
                             </text>
                           </Show>
