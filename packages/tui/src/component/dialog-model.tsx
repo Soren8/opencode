@@ -27,6 +27,33 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
     const favorites = connected() ? local.model.favorite() : []
     const recents = local.model.recent()
 
+    function shortRef(ref: { providerID: string; modelID: string } | undefined) {
+      if (!ref) return "not set"
+      const provider = sync.data.provider.find((item) => item.id === ref.providerID)
+      const info = provider?.models[ref.modelID]
+      return `${info?.name ?? ref.modelID} · ${provider?.name ?? ref.providerID}`
+    }
+
+    // Layer switchers sit above the model list so main/sub/plan are
+    // reachable from one dialog without extra commands or keybindings.
+    function layerOptions() {
+      const layers = [
+        { layer: "main" as const, title: "Main model", ref: local.model.current() },
+        { layer: "sub" as const, title: "Sub model", ref: local.stack.selection().sub },
+        { layer: "plan" as const, title: "Plan model", ref: local.stack.selection().plan },
+      ]
+      return layers.map((item) => ({
+        value: { layer: item.layer },
+        title: item.title,
+        description: shortRef(item.ref ?? undefined),
+        footer: target() === item.layer ? "current" : undefined,
+        category: "Layer",
+        onSelect: () => {
+          dialog.replace(() => <DialogModel target={item.layer} />)
+        },
+      }))
+    }
+
     function toOptions(items: typeof favorites, category: string) {
       if (!showSections) return []
       return items.flatMap((item) => {
@@ -119,6 +146,7 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
 
     if (needle) {
       return [
+        ...fuzzysort.go(needle, layerOptions(), { keys: ["title"] }).map((x) => x.obj),
         ...sortModelOptions(
           fuzzysort.go(needle, providerOptions, { keys: ["title", "category"] }).map((x) => x.obj),
           false,
@@ -127,7 +155,7 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
       ]
     }
 
-    return [...favoriteOptions, ...recentOptions, ...providerOptions, ...popularProviders]
+    return [...layerOptions(), ...favoriteOptions, ...recentOptions, ...providerOptions, ...popularProviders]
   })
 
   const provider = createMemo(() =>
@@ -188,30 +216,6 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
           hidden: !connected(),
           onTrigger: (option) => {
             local.model.toggleFavorite(option.value as { providerID: string; modelID: string })
-          },
-        },
-        {
-          command: "model.dialog.target.main",
-          title: "Main model",
-          hidden: target() === "main",
-          onTrigger() {
-            dialog.replace(() => <DialogModel target="main" />)
-          },
-        },
-        {
-          command: "model.dialog.target.sub",
-          title: "Sub model",
-          hidden: target() === "sub",
-          onTrigger() {
-            dialog.replace(() => <DialogModel target="sub" />)
-          },
-        },
-        {
-          command: "model.dialog.target.plan",
-          title: "Plan model",
-          hidden: target() === "plan",
-          onTrigger() {
-            dialog.replace(() => <DialogModel target="plan" />)
           },
         },
       ]}
