@@ -1,5 +1,5 @@
 import { createMemo, createSignal } from "solid-js"
-import { useLocal, type StackLayer } from "../context/local"
+import { useLocal, stackRoleForAgent, type StackLayer } from "../context/local"
 import { map, pipe, flatMap, entries, filter, sortBy, take } from "remeda"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
@@ -192,7 +192,9 @@ export function DialogModel(props: { providerID?: string; target?: StackLayer })
       dialog.clear()
       return
     }
-    dialog.replace(() => <DialogVariant model={picked} />)
+    const agent = local.agent.current()
+    const variantLayer = layer === "main" && agent ? stackRoleForAgent(agent) : layer
+    dialog.replace(() => <DialogVariant model={picked} layer={variantLayer} />)
   }
 
   return (

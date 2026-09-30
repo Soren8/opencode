@@ -112,6 +112,10 @@ This is used internally and can be invoked using `@general` in messages.
 
 Learn more about [agents](https://opencode.ai/docs/agents).
 
+#### Reasoning levels in model stacks
+
+The terminal model picker offers separate Main, Sub, and Plan selections. Each layer remembers its own reasoning level for each model, so the same model can use `high` for Main and `medium` for Sub. Selecting Default or cycling the active agent's reasoning level affects only that layer. Choices persist across restarts; existing saved model-wide choices remain the fallback until a layer has its own selection.
+
 ### Documentation
 
 For more info on how to configure OpenCode, [**head over to our docs**](https://opencode.ai/docs).

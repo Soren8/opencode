@@ -1,12 +1,16 @@
 import { createMemo } from "solid-js"
-import { useLocal, type StackRef } from "../context/local"
+import { useLocal, stackRoleForAgent, type StackRef, type StackLayer } from "../context/local"
 import { DialogSelect } from "../ui/dialog-select"
 import { useDialog } from "../ui/dialog"
 
-export function DialogVariant(props: { model?: StackRef }) {
+export function DialogVariant(props: { model?: StackRef; layer?: StackLayer }) {
   const local = useLocal()
   const dialog = useDialog()
   const target = () => props.model
+  const layer = () => {
+    const agent = local.agent.current()
+    return props.layer ?? (agent ? stackRoleForAgent(agent) : "main")
+  }
 
   function list() {
     const m = target()
@@ -15,12 +19,12 @@ export function DialogVariant(props: { model?: StackRef }) {
 
   function selected() {
     const m = target()
-    return m ? local.model.variant.selectedFor(m) : local.model.variant.selected()
+    return m ? local.model.variant.selectedFor(m, layer()) : local.model.variant.selected()
   }
 
   function set(value: string | undefined) {
     const m = target()
-    if (m) local.model.variant.setFor(m, value)
+    if (m) local.model.variant.setFor(m, value, layer())
     else local.model.variant.set(value)
   }
 
@@ -52,12 +56,5 @@ export function DialogVariant(props: { model?: StackRef }) {
     return `Select variant · ${id}`
   })
 
-  return (
-    <DialogSelect<string>
-      options={options()}
-      title={title()}
-      current={selected()}
-      flat={true}
-    />
-  )
+  return <DialogSelect<string> options={options()} title={title()} current={selected()} flat={true} />
 }

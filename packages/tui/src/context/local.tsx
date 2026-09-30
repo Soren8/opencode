@@ -330,8 +330,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           try {
             const current = sync.session.get(sessionID)
             const metadata = { ...((current?.metadata ?? {}) as Record<string, unknown>) }
-            const subVariant = sel.sub ? model.variant.currentFor(sel.sub) : undefined
-            const planVariant = sel.plan ? model.variant.currentFor(sel.plan) : undefined
+            const subVariant = sel.sub ? model.variant.currentFor(sel.sub, "sub") : undefined
+            const planVariant = sel.plan ? model.variant.currentFor(sel.plan, "plan") : undefined
             metadata.stack = {
               ...(sel.name ? { name: sel.name } : {}),
               ...(sel.main ? { main: `${sel.main.providerID}/${sel.main.modelID}` } : {}),
@@ -367,12 +367,14 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           modelID: string
         }[]
         variant: Record<string, string | undefined>
+        variantByLayer: Record<StackLayer, Record<string, string | undefined>>
       }>({
         ready: false,
         model: {},
         recent: [],
         favorite: [],
         variant: {},
+        variantByLayer: { main: {}, sub: {}, plan: {} },
       })
 
       const filePath = path.join(paths.state, "model.json")
@@ -390,6 +392,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           recent: modelStore.recent,
           favorite: modelStore.favorite,
           variant: modelStore.variant,
+          variantByLayer: modelStore.variantByLayer,
         })
       }
 
@@ -401,6 +404,18 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (Array.isArray(value.favorite)) setModelStore("favorite", value.favorite)
           if (typeof value.variant === "object" && value.variant !== null)
             setModelStore("variant", value.variant as Record<string, string | undefined>)
+          if (value.variantByLayer && typeof value.variantByLayer === "object") {
+            const layers = value.variantByLayer as Record<string, unknown>
+            for (const layer of ["main", "sub", "plan"] as const) {
+              const entries = layers[layer]
+              if (!entries || typeof entries !== "object" || Array.isArray(entries)) continue
+              setModelStore(
+                "variantByLayer",
+                layer,
+                Object.fromEntries(Object.entries(entries).filter(([, choice]) => typeof choice === "string")),
+              )
+            }
+          }
         })
         .catch(() => {})
         .finally(() => {
@@ -578,12 +593,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           selected() {
             const m = currentModel()
             if (!m) return undefined
-            return this.selectedFor(m)
+            const a = agent.current()
+            if (!a) return undefined
+            return this.selectedFor(m, stackRoleForAgent(a))
           },
           current() {
             const m = currentModel()
             if (!m) return undefined
-            return this.currentFor(m)
+            const a = agent.current()
+            if (!a) return undefined
+            return this.currentFor(m, stackRoleForAgent(a))
           },
           list() {
             const m = currentModel()
@@ -593,30 +612,36 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           set(value: string | undefined) {
             const m = currentModel()
             if (!m) return
-            this.setFor(m, value)
+            const a = agent.current()
+            if (!a) return
+            this.setFor(m, value, stackRoleForAgent(a))
           },
           cycle() {
             const m = currentModel()
             if (!m) return
+            const a = agent.current()
+            if (!a) return
+            const layer = stackRoleForAgent(a)
             const variants = this.listFor(m)
             if (variants.length === 0) return
-            const current = this.currentFor(m)
+            const current = this.currentFor(m, layer)
             if (!current) {
-              this.setFor(m, variants[0])
+              this.setFor(m, variants[0], layer)
               return
             }
             const index = variants.indexOf(current)
             if (index === -1 || index === variants.length - 1) {
-              this.setFor(m, undefined)
+              this.setFor(m, undefined, layer)
               return
             }
-            this.setFor(m, variants[index + 1])
+            this.setFor(m, variants[index + 1], layer)
           },
-          selectedFor(model: { providerID: string; modelID: string }) {
-            return modelStore.variant[`${model.providerID}/${model.modelID}`]
+          selectedFor(model: { providerID: string; modelID: string }, layer: StackLayer) {
+            const key = `${model.providerID}/${model.modelID}`
+            return modelStore.variantByLayer[layer][key] ?? modelStore.variant[key]
           },
-          currentFor(model: { providerID: string; modelID: string }) {
-            const v = this.selectedFor(model)
+          currentFor(model: { providerID: string; modelID: string }, layer: StackLayer) {
+            const v = this.selectedFor(model, layer)
             if (!v) return undefined
             if (!this.listFor(model).includes(v)) return undefined
             return v
@@ -627,8 +652,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
             if (!info?.variants) return []
             return Object.keys(info.variants)
           },
-          setFor(model: { providerID: string; modelID: string }, value: string | undefined) {
-            setModelStore("variant", `${model.providerID}/${model.modelID}`, value ?? "default")
+          setFor(model: { providerID: string; modelID: string }, value: string | undefined, layer: StackLayer) {
+            setModelStore("variantByLayer", layer, `${model.providerID}/${model.modelID}`, value ?? "default")
             save()
           },
         },

@@ -775,7 +775,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
               variant: "info",
             })
           }
-          dialog.replace(() => <DialogVariant model={sub} />)
+          dialog.replace(() => <DialogVariant model={sub} layer="sub" />)
         },
       },
       {
@@ -798,7 +798,7 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
               variant: "info",
             })
           }
-          dialog.replace(() => <DialogVariant model={plan} />)
+          dialog.replace(() => <DialogVariant model={plan} layer="plan" />)
         },
       },
       {
