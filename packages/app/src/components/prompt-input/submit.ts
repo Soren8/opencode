@@ -231,6 +231,19 @@ type PromptSubmitInput = {
   model?: ModelSelection
 }
 
+export function parseAutoCompactTokens(value: string): number | null {
+  const trimmed = value.trim().toLowerCase()
+  const match = trimmed.match(/^(\d+)([km]?)$/)
+  if (!match) return null
+  const amount = Number(match[1])
+  if (!Number.isFinite(amount) || amount <= 0) return null
+  const suffix = match[2]
+  const multiplier = suffix === "k" ? 1000 : suffix === "m" ? 1_000_000 : 1
+  const result = amount * multiplier
+  if (!Number.isFinite(result) || result <= 0) return null
+  return result
+}
+
 export function createPromptSubmit(input: PromptSubmitInput) {
   const navigate = useNavigate()
   const sdk = useSDK()
@@ -512,6 +525,68 @@ export function createPromptSubmit(input: PromptSubmitInput) {
     if (text.startsWith("/")) {
       const [cmdName, ...args] = text.split(" ")
       const commandName = cmdName.slice(1)
+
+      if (commandName === "auto-compact") {
+        clearInput()
+        const arg = args.join(" ").trim()
+        const current = (serverSync().data as { config?: { compaction?: { auto_compact_tokens?: number } } } | undefined)?.config?.compaction?.auto_compact_tokens
+
+        if (arg === "") {
+          showToast({
+            title: "Auto-compact",
+            description: current
+              ? `Current auto-compact limit: ${current} tokens`
+              : "Current auto-compact limit: 200000 tokens (default)",
+          })
+          return
+        }
+
+        if (arg.toLowerCase() === "default") {
+          try {
+            await serverSync().updateConfig({ compaction: { auto_compact_tokens: 200000 } } as never)
+            showToast({
+              title: "Auto-compact",
+              description: "Auto-compact limit reset to default (200000 tokens)",
+            })
+          } catch (err) {
+            showToast({
+              title: "Auto-compact",
+              description: err instanceof Error ? err.message : "Failed to update auto-compact limit",
+              variant: "error",
+            })
+            restoreInput()
+          }
+          return
+        }
+
+        const parsed = parseAutoCompactTokens(arg)
+        if (parsed === null) {
+          showToast({
+            title: "Auto-compact",
+            description: "Invalid token limit. Use a positive integer like 150000, 200k, or 1m.",
+            variant: "error",
+          })
+          restoreInput()
+          return
+        }
+
+        try {
+          await serverSync().updateConfig({ compaction: { auto_compact_tokens: parsed } } as never)
+          showToast({
+            title: "Auto-compact",
+            description: `Auto-compact limit set to ${parsed} tokens`,
+          })
+        } catch (err) {
+          showToast({
+            title: "Auto-compact",
+            description: err instanceof Error ? err.message : "Failed to update auto-compact limit",
+            variant: "error",
+          })
+          restoreInput()
+        }
+        return
+      }
+
       const customCommand = sync().data.command.find((c) => c.name === commandName)
       if (customCommand) {
         clearInput()

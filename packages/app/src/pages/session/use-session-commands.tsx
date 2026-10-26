@@ -484,6 +484,22 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
       onSelect: compact,
     }),
     sessionCommand({
+      id: "session.autoCompact",
+      title: "Auto-compact limit",
+      description: "Set the auto-compact token limit (e.g. 200k, 1m)",
+      slash: "auto-compact",
+      disabled: false,
+      onSelect: () => {
+        const current = (sync().data.config as { compaction?: { auto_compact_tokens?: number } })?.compaction?.auto_compact_tokens
+        showToast({
+          title: "Auto-compact",
+          description: current
+            ? `Current auto-compact limit: ${current} tokens`
+            : "Current auto-compact limit: 200000 tokens (default)",
+        })
+      },
+    }),
+    sessionCommand({
       id: "session.fork",
       title: language.t("command.session.fork"),
       description: language.t("command.session.fork.description"),
