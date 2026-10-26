@@ -58,6 +58,7 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
         tokens: info.compaction.preserve_recent_tokens,
       },
       buffer: info.compaction.reserved,
+      auto_compact_tokens: info.compaction.auto_compact_tokens,
     },
     skills: info.skills && [...(info.skills.paths ?? []), ...(info.skills.urls ?? [])],
     commands: info.command,

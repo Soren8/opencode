@@ -171,6 +171,9 @@ export const Info = Schema.Struct({
       reserved: Schema.optional(NonNegativeInt).annotate({
         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
       }),
+      auto_compact_tokens: Schema.optional(PositiveInt).annotate({
+        description: "Token limit that triggers automatic compaction. Defaults to 200000.",
+      }),
     }),
   ),
   experimental: Schema.optional(
