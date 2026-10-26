@@ -6,6 +6,17 @@ import { ProviderTransform } from "@/provider/transform"
 import type { MessageV2 } from "./message-v2"
 
 const COMPACTION_BUFFER = 20_000
+export const AUTO_COMPACT_TOKENS = 200_000
+
+type CompactionConfig = {
+  auto_compact_tokens?: number
+  reserved?: number
+}
+
+function configuredAutoCompactTokens(cfg: ConfigV1.Info): number {
+  const value = (cfg.compaction as CompactionConfig | undefined)?.auto_compact_tokens
+  return typeof value === "number" && value > 0 ? value : AUTO_COMPACT_TOKENS
+}
 
 export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
   const context = input.model.limit.context
@@ -14,9 +25,10 @@ export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outpu
   const reserved =
     input.cfg.compaction?.reserved ??
     Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
-  return input.model.limit.input
+  const modelUsable = input.model.limit.input
     ? Math.max(0, input.model.limit.input - reserved)
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
+  return Math.min(modelUsable, configuredAutoCompactTokens(input.cfg))
 }
 
 export function isOverflow(input: {

@@ -30,7 +30,8 @@ export const PRUNE_PROTECT = 40_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
-const MAX_PRESERVE_RECENT_TOKENS = 15_000
+const MAX_PRESERVE_RECENT_TOKENS = 12_000
+const SUMMARY_OUTPUT_TOKENS = 4_096
 type Turn = {
   start: number
   end: number
@@ -445,6 +446,7 @@ const layer = Layer.effect(
           },
         ],
         model,
+        maxOutputTokens: SUMMARY_OUTPUT_TOKENS,
       })
 
       if (result === "compact") {

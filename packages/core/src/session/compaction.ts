@@ -13,6 +13,7 @@ const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
 const TOOL_OUTPUT_MAX_CHARS = 2_000
 const SUMMARY_OUTPUT_TOKENS = 4_096
+const AUTO_COMPACT_TOKENS = 200_000
 const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
 <template>
 ## Objective
@@ -42,7 +43,8 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
-- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- The entire summary must stay under 4000 tokens. Drop finished detail, code, logs, and file contents. Keep only what the next turn needs.
+- Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known, but only the ones still needed.
 - Do not mention the summary process or that context was compacted.`
 const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
 
@@ -63,6 +65,7 @@ type Settings = {
   readonly auto: boolean
   readonly buffer: number
   readonly tokens: number
+  readonly autoCompactTokens: number
 }
 
 type Dependencies = {
@@ -125,12 +128,17 @@ const settings = (documents: readonly Config.Entry[]) => {
     .filter((entry): entry is Config.Document => entry.type === "document")
     .flatMap((entry) => (entry.info.compaction ? [entry.info.compaction] : []))
   return configured.reduce<Settings>(
-    (result, current) => ({
-      auto: current.auto ?? result.auto,
-      buffer: current.buffer ?? result.buffer,
-      tokens: current.keep?.tokens ?? result.tokens,
-    }),
-    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS },
+    (result, current) => {
+      const raw = (current as { auto_compact_tokens?: unknown }).auto_compact_tokens
+      const override = typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : undefined
+      return {
+        auto: current.auto ?? result.auto,
+        buffer: current.buffer ?? result.buffer,
+        tokens: current.keep?.tokens ?? result.tokens,
+        autoCompactTokens: override ?? result.autoCompactTokens,
+      }
+    },
+    { auto: true, buffer: DEFAULT_BUFFER, tokens: DEFAULT_KEEP_TOKENS, autoCompactTokens: AUTO_COMPACT_TOKENS },
   )
 }
 
@@ -234,10 +242,9 @@ export const make = (dependencies: Dependencies) => {
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    if (
-      estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <=
-      context - Math.max(output, config.buffer)
-    )
+    const autoCompactTokens = config.autoCompactTokens > 0 ? config.autoCompactTokens : AUTO_COMPACT_TOKENS
+    const ceiling = Math.min(context - Math.max(output, config.buffer), autoCompactTokens)
+    if (estimate({ system: input.request.system, messages: input.request.messages, tools: input.request.tools }) <= ceiling)
       return false
     return yield* compactAfterOverflow(input)
   })
