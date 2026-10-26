@@ -1751,10 +1751,32 @@ export default function Page() {
     return followupMutation.variables?.id
   })
 
+  const waitingOnSubagent = createMemo(() => {
+    const id = params.id
+    if (!id) return false
+    const messages = sync().data.message[id] ?? []
+    const lastAssistant = [...messages].reverse().find((message) => message.role === "assistant")
+    if (!lastAssistant) return false
+    const parts = sync().data.part[lastAssistant.id] ?? []
+    return parts.some(
+      (part) =>
+        part.type === "tool" &&
+        part.tool === "task" &&
+        (part as { state?: { status?: string; metadata?: { background?: boolean } } }).state?.status === "running" &&
+        (part as { state?: { metadata?: { background?: boolean } } }).state?.metadata?.background !== true,
+    )
+  })
+
   const queueEnabled = createMemo(() => {
     const id = params.id
     if (!id) return false
-    return settings.general.followup() === "queue" && busy(id) && !composer.blocked() && !isChildSession()
+    return (
+      settings.general.followup() === "queue" &&
+      busy(id) &&
+      !composer.blocked() &&
+      !isChildSession() &&
+      !waitingOnSubagent()
+    )
   })
 
   const followupText = (item: FollowupDraft) => {

@@ -10,6 +10,7 @@ import { Session } from "./session"
 import { Agent } from "../agent/agent"
 import { Provider } from "@/provider/provider"
 import { Stack } from "../stack/stack"
+import { BackgroundJob } from "@/background/job"
 
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
@@ -135,6 +136,7 @@ const layer = Layer.effect(
     const scope = yield* Scope.Scope
     const instruction = yield* Instruction.Service
     const state = yield* SessionRunState.Service
+    const background = yield* BackgroundJob.Service
     const revert = yield* SessionRevert.Service
     const summary = yield* SessionSummary.Service
     const sys = yield* SystemPrompt.Service
@@ -1081,6 +1083,14 @@ const layer = Layer.effect(
       }
 
       if (input.noReply === true) return message
+      const foreground = (yield* background.list()).filter(
+        (job) =>
+          job.type === "task" &&
+          job.status === "running" &&
+          job.metadata?.parentSessionId === input.sessionID &&
+          job.metadata?.background !== true,
+      )
+      yield* Effect.forEach(foreground, (job) => background.promote(job.id), { discard: true })
       return yield* loop({ sessionID: input.sessionID })
     })
 
@@ -1640,6 +1650,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,
+    BackgroundJob.node,
   ],
 })
 
