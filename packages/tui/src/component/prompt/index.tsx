@@ -46,6 +46,7 @@ import { useDialog } from "../../ui/dialog"
 import { DialogProvider as DialogProviderConnect } from "../dialog-provider"
 import { DialogAlert } from "../../ui/dialog-alert"
 import { useToast } from "../../ui/toast"
+import { runAutoCompact } from "../../util/auto-compact"
 import { useKV } from "../../context/kv"
 import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
@@ -1110,6 +1111,15 @@ export function Prompt(props: PromptProps) {
         command: inputText,
       })
       setStore("mode", "normal")
+    } else if (inputText.trimStart().startsWith("/auto-compact")) {
+      move.startSubmit()
+      const firstLineEnd = inputText.indexOf("\n")
+      const firstLine = firstLineEnd === -1 ? inputText : inputText.slice(0, firstLineEnd)
+      const arg = firstLine.slice("/auto-compact".length).trim()
+      await runAutoCompact({ sdk, sync, toast, arg })
+      input.clear()
+      if (finishMoveProgress) move.finishSubmit()
+      return true
     } else if (
       inputText.startsWith("/") &&
       sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))

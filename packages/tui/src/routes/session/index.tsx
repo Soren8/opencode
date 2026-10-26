@@ -58,6 +58,7 @@ import { filetype } from "../../util/filetype"
 import parsers from "../../parsers-config"
 import { errorMessage } from "../../util/error"
 import { Toast, useToast } from "../../ui/toast"
+import { runAutoCompact } from "../../util/auto-compact"
 import { useKV } from "../../context/kv.tsx"
 import stripAnsi from "strip-ansi"
 import { usePromptRef } from "../../context/prompt"
@@ -581,6 +582,23 @@ export function Session() {
           modelID: selectedModel.modelID,
           providerID: selectedModel.providerID,
         })
+        dialog.clear()
+      },
+    },
+    {
+      title: "Auto-compact limit",
+      value: "session.autoCompact",
+      category: "Session",
+      slash: {
+        name: "auto-compact",
+      },
+      run: async () => {
+        const input = promptRef.current?.current?.input ?? ""
+        const arg = input.trim().startsWith("/auto-compact")
+          ? input.trim().slice("/auto-compact".length).trim()
+          : ""
+        await runAutoCompact({ sdk, sync, toast, arg })
+        if (input.trim().startsWith("/auto-compact")) promptRef.current?.reset()
         dialog.clear()
       },
     },
