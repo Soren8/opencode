@@ -49,7 +49,14 @@ function View(props: { api: TuiPluginApi; session_id: string }) {
         <Show when={active().length <= 2 || open()}>
           <For each={active()}>
             {(item) => (
-              <box flexDirection="row" gap={1}>
+              <box
+                flexDirection="row"
+                gap={1}
+                onMouseUp={() => {
+                  if (props.api.renderer.getSelection()?.getSelectedText()) return
+                  props.api.route.navigate("session", { sessionID: item.id })
+                }}
+              >
                 <text fg={theme().text} wrapMode="word">
                   {item.title}
                 </text>
