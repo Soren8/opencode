@@ -150,6 +150,8 @@ export const TaskTool = Tool.define(
         ...(next.permission.some((rule) => rule.permission === id)
           ? []
           : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+        // Subagent questions go to the coordinator through the task result, never to the user.
+        { permission: "question", pattern: "*" as const, action: "deny" as const },
         ...(cfg.experimental?.primary_tools?.map((permission) => ({
           permission,
           pattern: "*" as const,
