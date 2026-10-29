@@ -310,6 +310,8 @@ This tool allows the LLM to ask the user questions during a task. It's useful fo
 
 Each question includes a header, the question text, and a list of options. Users can select from the provided options or type a custom answer. When there are multiple questions, users can navigate between them before submitting all answers.
 
+Subagents never ask the user directly. The `question` tool is denied in subagent sessions, so a subagent returns its questions in its task result and the primary agent answers them or asks the user.
+
 ---
 
 ## Custom tools
