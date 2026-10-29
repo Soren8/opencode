@@ -675,8 +675,25 @@ const layer = Layer.effect(
         if (changed) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
       }
 
-      if (changed) yield* invalidate()
-      return { info: next, changed }
+      const sandboxChanged = yield* updateAutoCompactOverrides(config)
+      if (changed || sandboxChanged) yield* invalidate()
+      return { info: next, changed: changed || sandboxChanged }
+    })
+
+    // OPENCODE_CONFIG and OPENCODE_CONFIG_CONTENT load after the global file, so an interactive
+    // auto-compact limit must be written to both or the sandbox config silently overrides it.
+    const updateAutoCompactOverrides = Effect.fnUntraced(function* (config: Info) {
+      const tokens = config.compaction?.auto_compact_tokens
+      if (tokens === undefined) return false
+      const patch = { compaction: { auto_compact_tokens: tokens } }
+      const file = process.env["OPENCODE_CONFIG"]
+      const before = file ? yield* readConfigFile(file) : undefined
+      const updated = before === undefined ? undefined : patchJsonc(before, patch)
+      if (file && updated !== undefined && updated !== before) yield* fs.writeFileString(file, updated).pipe(Effect.orDie)
+      const content = process.env["OPENCODE_CONFIG_CONTENT"]
+      const patchedContent = content === undefined ? undefined : patchJsonc(content, patch)
+      if (patchedContent !== undefined) process.env["OPENCODE_CONFIG_CONTENT"] = patchedContent
+      return (updated !== undefined && updated !== before) || patchedContent !== content
     })
 
     return Service.of({

@@ -384,6 +384,30 @@ it.effect("updates global config and omits empty shell key in json", () =>
   ),
 )
 
+it.effect("interactive auto_compact_tokens update overrides and updates OPENCODE_CONFIG", () =>
+  withGlobalConfig({}, ({ dir }) =>
+    Effect.gen(function* () {
+      const sandbox = path.join(dir, "sandbox", "opencode-sandbox.json")
+      const content = JSON.stringify({ username: "sandbox", compaction: { auto_compact_tokens: 190000 } }, null, 2)
+      yield* FSUtil.use.writeWithDirs(sandbox, content)
+
+      yield* withProcessEnvs(
+        { OPENCODE_CONFIG: sandbox, OPENCODE_CONFIG_CONTENT: content },
+        Effect.gen(function* () {
+          yield* Config.use.updateGlobal({ compaction: { auto_compact_tokens: 150000 } })
+
+          const written = ConfigParse.schema(ConfigV1.Info, yield* FSUtil.use.readJson(sandbox), sandbox)
+          expect(written.compaction?.auto_compact_tokens).toBe(150000)
+          expect(written.username).toBe("sandbox")
+          yield* clearEffect(true)
+          const project = yield* tmpdirScoped()
+          expect((yield* withInstanceDir(project, Config.use.get())).compaction?.auto_compact_tokens).toBe(150000)
+        }),
+      )
+    }),
+  ),
+)
+
 it.effect("updates global config and omits empty shell key in jsonc", () =>
   withGlobalConfig({ config: { shell: "bash", model: "test/model" }, name: "opencode.jsonc" }, ({ dir }) =>
     Effect.gen(function* () {
