@@ -18,11 +18,12 @@ const providerID = ProviderV2.ID.make("test")
 const retryProvider = "test"
 const it = testEffect(LayerNode.compile(LayerNode.group([SessionStatus.node, CrossSpawnSpawner.node])))
 
-function apiError(headers?: Record<string, string>): SessionV1.APIError {
+function apiError(headers?: Record<string, string>, statusCode?: number): SessionV1.APIError {
   return Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
     new SessionV1.APIError({
       message: "boom",
       isRetryable: true,
+      statusCode,
       responseHeaders: headers,
     }).toObject(),
   )
@@ -127,7 +128,7 @@ describe("session.retry.delay", () => {
   it.instance("policy stops after five retries", () =>
     Effect.gen(function* () {
       const attempts: number[] = []
-      const error = apiError({ "retry-after-ms": "0" })
+      const error = apiError({ "retry-after-ms": "0" }, 503)
       const step = yield* Schedule.toStepWithMetadata(
         SessionRetry.policy({
           provider: "test",
@@ -144,6 +145,29 @@ describe("session.retry.delay", () => {
       )
 
       expect(attempts).toStrictEqual([1, 2, 3, 4, 5])
+    }),
+  )
+
+  it.instance("policy keeps retrying network errors without an HTTP status for about five minutes", () =>
+    Effect.gen(function* () {
+      const attempts: number[] = []
+      const error = apiError({ "retry-after-ms": "0" })
+      const step = yield* Schedule.toStepWithMetadata(
+        SessionRetry.policy({
+          provider: "test",
+          parse: Schema.decodeUnknownSync(SessionV1.APIError.Schema),
+          set: (info) =>
+            Effect.sync(() => {
+              attempts.push(info.attempt)
+            }),
+        }),
+      )
+
+      yield* Effect.forEach(Array.from({ length: 20 }), () => Effect.ignore(step(error)))
+
+      expect(attempts).toStrictEqual(Array.from({ length: 13 }, (_, index) => index + 1))
+      const total = attempts.reduce((sum, attempt) => sum + SessionRetry.delay(attempt, apiError(), 0), 0)
+      expect(total).toBeGreaterThanOrEqual(300_000)
     }),
   )
 })
@@ -222,6 +246,16 @@ describe("session.retry.retryable", () => {
     "The model is currently at capacity due to high demand",
     "The service is temporarily at capacity",
     "upstream returned status 524",
+    "connect ENETUNREACH 10.255.255.1:443",
+    "connect EHOSTUNREACH 10.255.255.1:443",
+    "connect ENETDOWN",
+    "write EPIPE",
+    "ECONNABORTED",
+    "FailedToOpenSocket",
+    "ConnectionRefused",
+    "ConnectionClosed",
+    "Unable to connect. Is the computer able to access the url?",
+    "The operation timed out.",
   ])("retries matching API error text: %s", (message) => {
     expect(SessionRetry.retryable(wrap(message), retryProvider)).toEqual({ message })
   })
@@ -261,6 +295,16 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(request, retryProvider)).toEqual({
       message: "WebSocket closed before response.completed (code 1006: Connection ended)",
     })
+  })
+
+  test.each([
+    "WebSocket closed before response.completed (code 1006: Connection ended)",
+    "idle timeout waiting for websocket response",
+  ])("retries websocket transport text without the isRetryable flag: %s", (message) => {
+    const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(
+      new SessionV1.APIError({ message, isRetryable: false }).toObject(),
+    )
+    expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message })
   })
 
   test("does not retry context overflow errors", () => {
@@ -464,6 +508,29 @@ describe("session.message-v2.fromError", () => {
     },
     15_000,
   )
+
+  test.each([
+    [
+      "ENETUNREACH in fetch cause chain",
+      new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connect ENETUNREACH 10.255.255.1:443"), {
+          code: "ENETUNREACH",
+          syscall: "connect",
+        }),
+      }),
+    ],
+    [
+      "Bun ConnectionRefused",
+      Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), {
+        code: "ConnectionRefused",
+      }),
+    ],
+    ["Bun TimeoutError", new DOMException("The operation timed out.", "TimeoutError")],
+  ])("converts %s to retryable APIError", (_, error) => {
+    const result = MessageV2.fromError(error, { providerID })
+    expect(SessionV1.APIError.isInstance(result)).toBe(true)
+    expect(SessionRetry.retryable(result, retryProvider)).toBeDefined()
+  })
 
   test("ECONNRESET socket error is retryable", () => {
     const error = Schema.decodeUnknownSync(SessionV1.APIError.Schema)(

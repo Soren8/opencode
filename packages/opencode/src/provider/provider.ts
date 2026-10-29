@@ -32,7 +32,10 @@ import { ModelStatus } from "./model-status"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderError } from "./error"
 
-const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
+// A connection that died silently (e.g. after a wifi hop) only surfaces through these timeouts.
+// Chunks may legitimately pause while reasoning models think, so the idle window is longer.
+export const HEADER_TIMEOUT_DEFAULT = 60_000
+export const CHUNK_TIMEOUT_DEFAULT = 120_000
 
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
@@ -211,7 +214,7 @@ function custom(dep: CustomDep): Record<string, CustomLoader> {
         async getModel(sdk: any, modelID: string, _options?: Record<string, any>) {
           return sdk.responses(modelID)
         },
-        options: { headerTimeout: OPENAI_HEADER_TIMEOUT_DEFAULT },
+        options: { headerTimeout: HEADER_TIMEOUT_DEFAULT },
       }),
     meta: () =>
       Effect.succeed({
@@ -1796,8 +1799,8 @@ const layer = Layer.effect(
         if (existing) return existing
 
         const customFetch = options["fetch"]
-        const chunkTimeout = options["chunkTimeout"] ?? 300_000
-        const headerTimeout = options["headerTimeout"] ?? 300_000
+        const chunkTimeout = options["chunkTimeout"] ?? CHUNK_TIMEOUT_DEFAULT
+        const headerTimeout = options["headerTimeout"] ?? HEADER_TIMEOUT_DEFAULT
         delete options["chunkTimeout"]
         delete options["headerTimeout"]
 

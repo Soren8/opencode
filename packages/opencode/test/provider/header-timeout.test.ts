@@ -1,4 +1,4 @@
-import { afterEach, expect } from "bun:test"
+import { afterEach, expect, test } from "bun:test"
 import { createServer, type Server } from "node:http"
 import { streamText } from "ai"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -227,6 +227,11 @@ it.live("OpenAI Codex header and chunk timeout defaults can be disabled by confi
   }),
 )
 
+test("default stall timeouts detect a dead connection within two minutes", () => {
+  expect(Provider.HEADER_TIMEOUT_DEFAULT).toBe(60_000)
+  expect(Provider.CHUNK_TIMEOUT_DEFAULT).toBe(120_000)
+})
+
 it.live("OpenAI API auth gets default headerTimeout", () =>
   Effect.gen(function* () {
     yield* withAuthContent(
@@ -235,7 +240,7 @@ it.live("OpenAI API auth gets default headerTimeout", () =>
           Effect.gen(function* () {
             const provider = yield* Provider.Service
             const openai = yield* provider.getProvider(ProviderV2.ID.openai)
-            expect(openai.options.headerTimeout).toBe(300_000)
+            expect(openai.options.headerTimeout).toBe(60_000)
           }),
         )
       }),

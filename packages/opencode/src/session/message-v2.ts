@@ -601,6 +601,31 @@ export function latest(msgs: WithParts[]) {
   return { user, assistant, finished, tasks }
 }
 
+// Connection failures surface as Node codes (ENETUNREACH) or Bun codes (ConnectionRefused), often
+// nested in the cause of a generic "fetch failed" TypeError.
+const NETWORK_ERROR_CODES = new Set([
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+  "ENETDOWN",
+  "EPIPE",
+  "ECONNABORTED",
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "FAILEDTOOPENSOCKET",
+  "CONNECTIONREFUSED",
+  "CONNECTIONCLOSED",
+])
+
+function networkErrorCode(input: unknown, depth = 0): string | undefined {
+  if (!(input instanceof Error) || depth >= 5) return undefined
+  const code = (input as SystemError).code
+  if (typeof code === "string" && NETWORK_ERROR_CODES.has(code.toUpperCase())) return code
+  if (input.name === "TimeoutError") return input.name
+  return networkErrorCode(input.cause, depth + 1)
+}
+
 function isAfter(info: Info, other?: Info) {
   if (!other) return true
   if (info.time.created !== other.time.created) return info.time.created > other.time.created
@@ -638,6 +663,18 @@ export function fromError(
             code: (e as SystemError).code ?? "",
             syscall: (e as SystemError).syscall ?? "",
             message: (e as SystemError).message ?? "",
+          },
+        },
+        { cause: e },
+      ).toObject()
+    case networkErrorCode(e) !== undefined:
+      return new APIError(
+        {
+          message: errorMessage(e),
+          isRetryable: true,
+          metadata: {
+            code: networkErrorCode(e) ?? "",
+            message: errorMessage(e),
           },
         },
         { cause: e },
