@@ -6,7 +6,7 @@ import { ProviderTransform } from "@/provider/transform"
 import type { MessageV2 } from "./message-v2"
 
 const COMPACTION_BUFFER = 20_000
-export const AUTO_COMPACT_TOKENS = 200_000
+export const AUTO_COMPACT_TOKENS = 190_000
 
 type CompactionConfig = {
   auto_compact_tokens?: number

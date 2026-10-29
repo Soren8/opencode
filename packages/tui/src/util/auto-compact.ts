@@ -15,7 +15,7 @@ export async function runAutoCompact(input: {
       title: "Auto-compact",
       message: current
         ? `Current auto-compact limit: ${current} tokens`
-        : "Current auto-compact limit: 200000 tokens (default)",
+        : "Current auto-compact limit: 190000 tokens (default)",
       variant: "info",
     })
     return
@@ -24,11 +24,11 @@ export async function runAutoCompact(input: {
   if (trimmed.toLowerCase() === "default") {
     try {
       await sdk.client.global.config.update({
-        config: { compaction: { auto_compact_tokens: 200000 } },
+        config: { compaction: { auto_compact_tokens: 190000 } },
       })
       toast.show({
         title: "Auto-compact",
-        message: "Auto-compact limit reset to default (200000 tokens)",
+        message: "Auto-compact limit reset to default (190000 tokens)",
         variant: "success",
       })
     } catch (err) {

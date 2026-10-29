@@ -536,17 +536,17 @@ export function createPromptSubmit(input: PromptSubmitInput) {
             title: "Auto-compact",
             description: current
               ? `Current auto-compact limit: ${current} tokens`
-              : "Current auto-compact limit: 200000 tokens (default)",
+              : "Current auto-compact limit: 190000 tokens (default)",
           })
           return
         }
 
         if (arg.toLowerCase() === "default") {
           try {
-            await serverSync().updateConfig({ compaction: { auto_compact_tokens: 200000 } } as never)
+            await serverSync().updateConfig({ compaction: { auto_compact_tokens: 190000 } } as never)
             showToast({
               title: "Auto-compact",
-              description: "Auto-compact limit reset to default (200000 tokens)",
+              description: "Auto-compact limit reset to default (190000 tokens)",
             })
           } catch (err) {
             showToast({

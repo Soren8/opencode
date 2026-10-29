@@ -495,7 +495,7 @@ export const useSessionCommands = (actions: SessionCommandContext) => {
           title: "Auto-compact",
           description: current
             ? `Current auto-compact limit: ${current} tokens`
-            : "Current auto-compact limit: 200000 tokens (default)",
+            : "Current auto-compact limit: 190000 tokens (default)",
         })
       },
     }),

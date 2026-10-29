@@ -453,6 +453,18 @@ describe("session.compaction.isOverflow", () => {
   )
 
   it.live(
+    "compacts at 190k by default",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        const model = createModel({ context: 1_000_000, output: 32_000 })
+        const tokens = { input: 190_000, output: 0, reasoning: 0, cache: { read: 0, write: 0 } }
+        expect(yield* compact.isOverflow({ tokens, model })).toBe(true)
+      }),
+    ),
+  )
+
+  it.live(
     "does not compact at 200k when configured auto_compact_tokens is higher",
     provideTmpdirInstance(
       () =>
