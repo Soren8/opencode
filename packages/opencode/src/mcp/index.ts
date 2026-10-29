@@ -26,7 +26,7 @@ import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
-import { Cause, Effect, Exit, Layer, Context, Schema, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Context, Schema, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
@@ -145,6 +145,7 @@ interface State {
   clients: Record<string, MCPClient>
   defs: Record<string, MCPToolDef[]>
   instructions: Record<string, string>
+  reconnects: Record<string, Fiber.Fiber<void>>
 }
 
 export interface ServerInstructions {
@@ -452,6 +453,12 @@ const layer = Layer.effect(
             Effect.ignore,
           ),
         )
+        if (s.reconnects[name]) return
+        const fiber = bridge.fork(reconnect(s, name).pipe(Effect.ignore))
+        s.reconnects[name] = fiber
+        fiber.addObserver(() => {
+          if (s.reconnects[name] === fiber) delete s.reconnects[name]
+        })
       }
 
       client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) =>
@@ -470,6 +477,31 @@ const layer = Layer.effect(
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
     }
+
+    // Remote servers drop when the network changes (e.g. a wifi hop); retry until the server is back
+    // or something else (disconnect, reconnect, removal) takes over its slot.
+    const reconnect = Effect.fnUntraced(function* (s: State, name: string) {
+      for (let attempt = 0; ; attempt++) {
+        yield* Effect.sleep(Math.min(1000 * 2 ** attempt, 30_000))
+        if (s.clients[name] || s.status[name]?.status !== "failed") return
+        const mcp = yield* getMcpConfig(name)
+        if (!mcp || mcp.type !== "remote" || mcp.enabled === false) return
+        const result = yield* create(name, mcp)
+        if (s.clients[name] || s.status[name]?.status !== "failed") {
+          if (result.mcpClient) yield* Effect.tryPromise(() => result.mcpClient!.close()).pipe(Effect.ignore)
+          return
+        }
+        if (result.mcpClient) {
+          yield* storeClient(s, name, result.mcpClient, result.defs!, result.instructions, mcp.timeout)
+          yield* events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore)
+          return
+        }
+        if (result.status.status !== "failed") {
+          s.status[name] = result.status
+          return
+        }
+      }
+    })
 
     function serverLog(name: string, params: LoggingMessageNotification["params"]) {
       const fields = { server: name, logger: params.logger, level: params.level, data: params.data }
@@ -500,6 +532,7 @@ const layer = Layer.effect(
           clients: {},
           defs: {},
           instructions: {},
+          reconnects: {},
         }
 
         yield* Effect.forEach(
@@ -530,6 +563,7 @@ const layer = Layer.effect(
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            yield* Fiber.interruptAll(Object.values(s.reconnects))
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}

@@ -543,6 +543,31 @@ it.instance("remote timeout aborts both real HTTP transport attempts", () =>
   }),
 )
 
+it.instance("remote server reconnects after unexpected connection close", () =>
+  Effect.gen(function* () {
+    const server = yield* lifecycleServer()
+    const mcp = yield* MCP.Service
+    yield* mcp.add("drop-server", remote(server.url))
+    expect((yield* mcp.status())["drop-server"]?.status).toBe("connected")
+
+    const dropped = (yield* mcp.clients())["drop-server"]
+    if (!dropped) return yield* Effect.fail(new Error("missing drop-server client"))
+    // The fixture serves a single MCP session; restart it so it accepts the reconnect's new session.
+    yield* Effect.promise(server.restart)
+    yield* Effect.promise(() => dropped.close())
+
+    const recovered = yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const current = (yield* mcp.status())["drop-server"]
+        return current?.status === "connected" ? current : undefined
+      }),
+      "remote server did not reconnect after unexpected close",
+    )
+    expect(recovered.status).toBe("connected")
+    expect(Object.keys(yield* mcp.tools())).toEqual(["drop-server_test_tool"])
+  }),
+)
+
 it.live("McpOAuthCallback.cancelPending rejects the pending callback", () =>
   Effect.acquireUseRelease(
     Effect.sync(() => McpOAuthCallback.waitForCallback("abc123hexstate", "my-mcp-server")),

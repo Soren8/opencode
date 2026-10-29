@@ -149,6 +149,8 @@ Add remote MCP servers by setting `type` to `"remote"`.
 
 The `url` is the URL of the remote MCP server and with the `headers` option you can pass in a list of headers.
 
+If a remote server's connection closes unexpectedly, for example after a network change, opencode reconnects it automatically, waiting 1 second before the first attempt and backing off to 30 seconds between attempts.
+
 ---
 
 #### Options
