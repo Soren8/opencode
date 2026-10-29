@@ -905,6 +905,68 @@ describe("tool.task", () => {
     }),
   )
 
+  it.instance("starts in background when a newer user prompt is already pending", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        time: { created: Date.now() },
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const ready = yield* Deferred.make<void>()
+      const done = yield* Deferred.make<void>()
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: (template) => Effect.succeed([{ type: "text" as const, text: template }]),
+        prompt: (input) =>
+          input.sessionID === chat.id
+            ? Effect.succeed(reply(input, "injected"))
+            : Effect.gen(function* () {
+                yield* Deferred.succeed(ready, undefined)
+                yield* Deferred.await(done)
+                return reply(input, "background done")
+              }),
+      }
+
+      const fiber = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.forkChild)
+
+      yield* Deferred.await(ready)
+      const result = yield* Fiber.join(fiber).pipe(Effect.timeoutOption("2 seconds"))
+      expect(result._tag).toBe("Some")
+      if (result._tag !== "Some") throw new Error("foreground task blocked the pending prompt")
+      expect(result.value.metadata.background).toBe(true)
+      expect((yield* jobs.get(result.value.metadata.sessionId))?.status).toBe("running")
+
+      yield* Deferred.succeed(done, undefined)
+      expect((yield* jobs.wait({ id: result.value.metadata.sessionId })).info?.output).toBe("background done")
+    }),
+  )
+
   background.instance("execute launches background tasks without waiting for completion", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service

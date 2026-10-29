@@ -12,7 +12,7 @@ import { Stack } from "../stack/stack"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Effect, Exit, Schema, Scope } from "effect"
+import { Effect, Exit, Option, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
@@ -341,6 +341,10 @@ export const TaskTool = Tool.define(
         yield* notify(info.id)
         return backgroundResult()
       }
+
+      // A prompt that arrived while this call was still streaming found no job to promote.
+      const latestUser = yield* sessions.findMessage(ctx.sessionID, (message) => message.info.role === "user")
+      if (Option.isSome(latestUser) && latestUser.value.info.id > ctx.messageID) yield* background.promote(info.id)
 
       const runCancel = yield* EffectBridge.make()
       const cancel = ops.cancel(nextSession.id)
