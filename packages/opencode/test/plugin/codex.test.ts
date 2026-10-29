@@ -9,6 +9,7 @@ import {
   extractAccountId,
   extractResidency,
   renderOAuthError,
+  type CodexRefreshOptions,
   type IdTokenClaims,
 } from "../../src/plugin/openai/codex"
 
@@ -469,7 +470,111 @@ describe("plugin.codex", () => {
       { authorization: `Bearer ${refreshedAccess}`, accountId: "acc-123", residency: "eu" },
     ])
   })
+
+  test("retries transient token refresh failures", async () => {
+    let refreshRequests = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname !== "/oauth/token") return new Response("{}")
+        refreshRequests += 1
+        if (refreshRequests === 1) return new Response("overloaded", { status: 503 })
+        return Response.json({
+          id_token: "",
+          access_token: "access-new",
+          refresh_token: "refresh-new",
+          expires_in: 3600,
+        })
+      },
+    })
+    const fixture = await loadOAuthWithExpiredAccess(server, { retryDelaysMs: [5, 5] })
+
+    const response = await fixture.loaded.fetch!("https://api.openai.com/v1/responses")
+
+    expect(response.status).toBe(200)
+    expect(refreshRequests).toBe(2)
+    expect(fixture.authUpdates).toHaveLength(1)
+    expect(fixture.authUpdates[0]?.refresh).toBe("refresh-new")
+    expect(fixture.authUpdates[0]?.access).toBe("access-new")
+  })
+
+  test("does not retry invalid_grant token refresh failures", async () => {
+    let refreshRequests = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        refreshRequests += 1
+        return new Response("invalid_grant", { status: 400 })
+      },
+    })
+    const fixture = await loadOAuthWithExpiredAccess(server, { retryDelaysMs: [5, 5] })
+
+    await expect(fixture.loaded.fetch!("https://api.openai.com/v1/responses")).rejects.toThrow(
+      "Token refresh failed: 400",
+    )
+
+    expect(refreshRequests).toBe(1)
+    expect(fixture.authUpdates).toHaveLength(0)
+  })
+
+  test("times out a hanging token refresh and retries", async () => {
+    let refreshRequests = 0
+    using server = Bun.serve({
+      port: 0,
+      fetch() {
+        refreshRequests += 1
+        return new Promise<Response>(() => {})
+      },
+    })
+    const fixture = await loadOAuthWithExpiredAccess(server, { timeoutMs: 50, retryDelaysMs: [10] })
+
+    const started = Date.now()
+    await expect(fixture.loaded.fetch!("https://api.openai.com/v1/responses")).rejects.toThrow("Token refresh failed")
+    expect(Date.now() - started).toBeLessThan(10_000)
+
+    expect(refreshRequests).toBe(2)
+    expect(fixture.authUpdates).toHaveLength(0)
+  })
 })
+
+async function loadOAuthWithExpiredAccess(server: { url: URL }, refresh: CodexRefreshOptions) {
+  const authUpdates: Array<{ refresh: string; access: string; expires: number; accountId?: string }> = []
+  const auth = {
+    type: "oauth" as const,
+    refresh: "refresh-old",
+    access: "",
+    expires: 0,
+  }
+  const hooks = await CodexAuthPlugin(
+    {
+      client: {
+        auth: {
+          async set(input: { body: { refresh: string; access: string; expires: number; accountId?: string } }) {
+            authUpdates.push(input.body)
+            auth.refresh = input.body.refresh
+            auth.access = input.body.access
+            auth.expires = input.body.expires
+          },
+        },
+      } as never,
+      project: {} as never,
+      directory: "",
+      worktree: "",
+      experimental_workspace: {
+        register() {},
+      },
+      serverUrl: new URL("https://example.com"),
+      $: {} as never,
+    },
+    {
+      issuer: server.url.origin,
+      codexApiEndpoint: new URL("/backend-api/codex/responses", server.url).toString(),
+      refresh,
+    },
+  )
+  const loaded = await hooks.auth!.loader!(async () => auth as never, {} as never)
+  return { hooks, loaded, authUpdates }
+}
 
 async function waitFor(predicate: () => boolean) {
   const started = Date.now()

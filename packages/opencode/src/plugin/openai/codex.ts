@@ -12,6 +12,8 @@ const ISSUER = "https://auth.openai.com"
 const CODEX_API_ENDPOINT = "https://chatgpt.com/backend-api/codex/responses"
 const OAUTH_PORT = 1455
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3000
+const REFRESH_TIMEOUT_MS = 30_000
+const REFRESH_RETRY_DELAYS_MS = [1000, 2000]
 const ALLOWED_MODELS = new Set(["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-6-sol", "gpt-6-luna"])
 const DISALLOWED_MODELS = new Set(["gpt-5.5-pro"])
 
@@ -108,10 +110,16 @@ interface TokenResponse {
   expires_in?: number
 }
 
+export interface CodexRefreshOptions {
+  timeoutMs?: number
+  retryDelaysMs?: number[]
+}
+
 interface CodexAuthPluginOptions {
   issuer?: string
   codexApiEndpoint?: string
   experimentalWebSockets?: boolean
+  refresh?: CodexRefreshOptions
 }
 
 async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: PkceCodes): Promise<TokenResponse> {
@@ -132,7 +140,15 @@ async function exchangeCodeForTokens(code: string, redirectUri: string, pkce: Pk
   return response.json()
 }
 
-async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promise<TokenResponse> {
+// Network drops and 5xx/429 are transient; retry them so a wifi hop doesn't fail the turn.
+// Other 4xx (e.g. invalid_grant) are permanent and propagate immediately.
+async function refreshAccessToken(
+  refreshToken: string,
+  issuer = ISSUER,
+  options: CodexRefreshOptions = {},
+  attempt = 0,
+): Promise<TokenResponse> {
+  const delays = options.retryDelaysMs ?? REFRESH_RETRY_DELAYS_MS
   const response = await fetch(`${issuer}/oauth/token`, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -141,10 +157,15 @@ async function refreshAccessToken(refreshToken: string, issuer = ISSUER): Promis
       refresh_token: refreshToken,
       client_id: CLIENT_ID,
     }).toString(),
-  })
-  if (!response.ok) {
-    throw new Error(`Token refresh failed: ${response.status}`)
+    signal: AbortSignal.timeout(options.timeoutMs ?? REFRESH_TIMEOUT_MS),
+  }).catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))))
+  const transient = response instanceof Error || response.status >= 500 || response.status === 429
+  if (transient && attempt < delays.length) {
+    await Bun.sleep(delays[attempt])
+    return refreshAccessToken(refreshToken, issuer, options, attempt + 1)
   }
+  if (response instanceof Error) throw new Error(`Token refresh failed: ${response.message}`, { cause: response })
+  if (!response.ok) throw new Error(`Token refresh failed: ${response.status}`)
   return response.json()
 }
 
@@ -368,7 +389,7 @@ export async function CodexAuthPlugin(input: PluginInput, options: CodexAuthPlug
 
             if (!currentAuth.access || currentAuth.expires < Date.now()) {
               if (!refreshPromise) {
-                refreshPromise = refreshAccessToken(currentAuth.refresh, issuer)
+                refreshPromise = refreshAccessToken(currentAuth.refresh, issuer, options.refresh)
                   .then(async (tokens) => {
                     const accountId = extractAccountId(tokens) || authWithAccount.accountId
                     await input.client.auth.set({
