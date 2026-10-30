@@ -28,7 +28,7 @@ import { useTuiStartup } from "./runtime"
 import { createSimpleContext } from "./helper"
 import { useExit } from "./exit"
 import { useArgs } from "./args"
-import { batch, onMount } from "solid-js"
+import { batch, onCleanup, onMount } from "solid-js"
 import path from "path"
 import { useKV } from "./kv"
 import { usePermission } from "./permission"
@@ -554,6 +554,15 @@ export const {
     onMount(() => {
       void bootstrap()
     })
+
+    onCleanup(
+      sdk.onReconnect(() => {
+        const synced = [...fullSyncedSessions]
+        fullSyncedSessions.clear()
+        void bootstrap({ fatal: false }).catch(() => {})
+        for (const sessionID of synced) void result.session.sync(sessionID).catch(() => {})
+      }),
+    )
 
     const result = {
       data: store,

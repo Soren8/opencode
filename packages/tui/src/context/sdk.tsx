@@ -16,6 +16,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
     fetch?: typeof fetch
     headers?: RequestInit["headers"]
     events?: EventSource
+    eventTimeout?: number
   }) => {
     const abort = new AbortController()
     let sse: AbortController | undefined
@@ -44,6 +45,11 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
         }
       },
     }
+
+    // The server heartbeats every 10 seconds. A link that died silently (e.g. after a wifi hop) never
+    // errors, so treat a quiet stream as dead and reconnect.
+    const eventTimeout = props.eventTimeout ?? 30_000
+    const reconnectHandlers = new Set<() => void>()
 
     let queue: GlobalEvent[] = []
     let timer: Timer | undefined
@@ -85,11 +91,16 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       sse = ctrl
       ;(async () => {
         let attempt = 0
+        let connected = false
         while (true) {
           if (abort.signal.aborted || ctrl.signal.aborted) break
 
+          const connection = new AbortController()
+          const stop = () => connection.abort()
+          ctrl.signal.addEventListener("abort", stop)
+          let watchdog = setTimeout(stop, eventTimeout)
           const events = await sdk.global.event({
-            signal: ctrl.signal,
+            signal: connection.signal,
             sseMaxRetryAttempts: 0,
           })
 
@@ -101,8 +112,18 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
 
           for await (const event of events.stream) {
             if (ctrl.signal.aborted) break
+            clearTimeout(watchdog)
+            watchdog = setTimeout(stop, eventTimeout)
+            attempt = 0
+            // Events emitted while disconnected are not replayed, so listeners must resync.
+            if (event.payload.type === "server.connected" && connected) {
+              for (const handler of reconnectHandlers) handler()
+            }
+            if (event.payload.type === "server.connected") connected = true
             handleEvent(event)
           }
+          clearTimeout(watchdog)
+          ctrl.signal.removeEventListener("abort", stop)
 
           if (timer) clearTimeout(timer)
           if (queue.length > 0) flush()
@@ -136,6 +157,7 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       sse?.abort()
       if (timer) clearTimeout(timer)
       handlers.clear()
+      reconnectHandlers.clear()
     })
 
     return {
@@ -144,6 +166,12 @@ export const { use: useSDK, provider: SDKProvider } = createSimpleContext({
       },
       directory: props.directory,
       event: emitter,
+      onReconnect(handler: () => void) {
+        reconnectHandlers.add(handler)
+        return () => {
+          reconnectHandlers.delete(handler)
+        }
+      },
       fetch: props.fetch ?? fetch,
       url: props.url,
     }
