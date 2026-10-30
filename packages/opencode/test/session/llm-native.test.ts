@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { LLMEvent, ToolFailure } from "@opencode-ai/llm"
+import { LLMError, LLMEvent, ProviderInternalReason, ToolFailure, TransportReason } from "@opencode-ai/llm"
 import { LLMClient, RequestExecutor, WebSocketExecutor, type LLMClientShape } from "@opencode-ai/llm/route"
 import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { Effect, Fiber, Layer, Stream } from "effect"
@@ -9,6 +9,9 @@ import { LLMNativeRuntime } from "@/session/llm/native-runtime"
 import type { Provider } from "@/provider/provider"
 
 import { OAUTH_DUMMY_KEY } from "@/auth"
+import { MessageV2 } from "@/session/message-v2"
+import { SessionRetry } from "@/session/retry"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -537,6 +540,63 @@ describe("session.llm-native.request", () => {
       const failure = yield* Effect.flip(wrapped.incomplete.execute({}, { id: "call-1", name: "incomplete" }))
       expect(failure).toBeInstanceOf(ToolFailure)
       expect(failure.message).toContain("incomplete")
+    }),
+  )
+
+  const nativeFailure = (failure: LLMError) =>
+    Effect.gen(function* () {
+      const native = LLMNativeRuntime.stream({
+        model: baseModel,
+        provider: providerInfo,
+        auth: undefined,
+        llmClient: {
+          prepare: () => Effect.die("unused"),
+          stream: () => Stream.fail(failure),
+          generate: () => Effect.die("unused"),
+        } as LLMClientShape,
+        messages: [],
+        tools: {},
+        headers: {},
+        abort: new AbortController().signal,
+      })
+      if (native.type === "unsupported") throw new Error(native.reason)
+      return MessageV2.fromError(yield* native.stream.pipe(Stream.runDrain, Effect.flip), {
+        providerID: ProviderV2.ID.make("openai"),
+      })
+    })
+
+  it.effect("classifies native transport failures as retryable network errors", () =>
+    Effect.gen(function* () {
+      const error = yield* nativeFailure(
+        new LLMError({
+          module: "RequestExecutor",
+          method: "execute",
+          reason: new TransportReason({ message: "HTTP transport failed", kind: "TransportError" }),
+        }),
+      )
+
+      expect(SessionV1.APIError.isInstance(error)).toBe(true)
+      if (!SessionV1.APIError.isInstance(error)) return
+      expect(error.data.statusCode).toBeUndefined()
+      expect(SessionRetry.retryable(error, "openai")).toBeDefined()
+    }),
+  )
+
+  it.effect("classifies retryable native status failures with their retry delay", () =>
+    Effect.gen(function* () {
+      const error = yield* nativeFailure(
+        new LLMError({
+          module: "RequestExecutor",
+          method: "execute",
+          reason: new ProviderInternalReason({ message: "Overloaded", status: 503, retryAfterMs: 1_500 }),
+        }),
+      )
+
+      expect(SessionV1.APIError.isInstance(error)).toBe(true)
+      if (!SessionV1.APIError.isInstance(error)) return
+      expect(error.data.statusCode).toBe(503)
+      expect(SessionRetry.retryable(error, "openai")).toBeDefined()
+      expect(SessionRetry.delay(1, error)).toBe(1_500)
     }),
   )
 

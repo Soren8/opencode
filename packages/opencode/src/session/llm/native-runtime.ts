@@ -1,13 +1,15 @@
 import type { Auth } from "@/auth"
 import type { Provider } from "@/provider/provider"
+import { ProviderError } from "@/provider/error"
 import { ProviderTransform } from "@/provider/transform"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
-import { asSchema, type ModelMessage, type Tool } from "ai"
+import { APICallError, asSchema, type ModelMessage, type Tool } from "ai"
 import { Cause, Effect, FiberSet, Queue } from "effect"
 import * as Stream from "effect/Stream"
 import { FetchHttpClient } from "effect/unstable/http"
 import {
+  LLMError,
   LLMRequest,
   Tool as NativeTool,
   ToolFailure,
@@ -133,6 +135,7 @@ export function stream(input: StreamInput): StreamResult {
                 FiberSet.awaitEmpty(settlements).pipe(Effect.andThen(Queue.end(results)), Effect.asVoid),
               ),
             ),
+            Stream.mapError(toSessionError),
           )
         return provider.pipe(Stream.concat(Stream.fromQueue(results)))
       }),
@@ -143,6 +146,29 @@ export function stream(input: StreamInput): StreamResult {
     ...current,
     stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
   }
+}
+
+// Session retry classifies AI SDK errors, so express native transient failures in those terms:
+// transport drops have no status and get the network retry budget.
+function toSessionError(error: unknown) {
+  if (!(error instanceof LLMError)) return error
+  if (error.reason._tag === "Transport")
+    return new ProviderError.ResponseStreamError(error.reason.message, { cause: error })
+  if (error.reason._tag !== "ProviderInternal" && error.reason._tag !== "RateLimit") return error
+  const http = error.reason.http
+  return new APICallError({
+    message: error.reason.message,
+    url: http?.request.url ?? "",
+    requestBodyValues: {},
+    statusCode: error.reason._tag === "RateLimit" ? (http?.response?.status ?? 429) : error.reason.status,
+    responseHeaders: {
+      ...http?.response?.headers,
+      ...(error.retryAfterMs === undefined ? {} : { "retry-after-ms": String(error.retryAfterMs) }),
+    },
+    responseBody: http?.body,
+    isRetryable: true,
+    cause: error,
+  })
 }
 
 function providerFetch(input: Pick<StreamInput, "provider" | "auth">): typeof globalThis.fetch | undefined {
