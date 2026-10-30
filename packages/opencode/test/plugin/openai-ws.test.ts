@@ -171,6 +171,53 @@ describe("plugin.openai.ws-pool", () => {
     fetch.close()
   })
 
+  test("replaces a pooled socket that stopped answering pings after a network change", async () => {
+    let connections = 0
+    await using server = await createWebSocketServer((socket) => {
+      connections += 1
+      const connection = connections
+      socket.on("message", () => {
+        socket.send(JSON.stringify({ type: "response.completed", response: { id: `resp_${connection}` } }))
+      })
+    })
+    await using proxy = await createBlackholeProxy(server.url)
+    const fetch = OpenAIWebSocketPool.createWebSocketFetch({
+      url: proxy.url,
+      idleTimeout: 30_000,
+      probeAfter: 0,
+      probeTimeout: 100,
+    })
+
+    const first = await fetch(proxy.url, streamRequest())
+    expect(await first.text()).toContain("data: [DONE]")
+
+    // The client socket still reads OPEN, but the established link silently drops everything.
+    proxy.blackholeExisting()
+    const second = await fetch(proxy.url, streamRequest())
+    expect(await second.text()).toContain("resp_2")
+    expect(connections).toBe(2)
+    fetch.close()
+  })
+
+  test("skips the liveness ping for a socket used moments ago", async () => {
+    let connections = 0
+    let pings = 0
+    await using server = await createWebSocketServer((socket) => {
+      connections += 1
+      socket.on("ping", () => pings++)
+      socket.on("message", () => {
+        socket.send(JSON.stringify({ type: "response.completed", response: { id: "resp" } }))
+      })
+    })
+    const fetch = OpenAIWebSocketPool.createWebSocketFetch({ url: server.url })
+
+    expect(await (await fetch(server.url, streamRequest())).text()).toContain("data: [DONE]")
+    expect(await (await fetch(server.url, streamRequest())).text()).toContain("data: [DONE]")
+    expect(connections).toBe(1)
+    expect(pings).toBe(0)
+    fetch.close()
+  })
+
   test("rotates a socket that exceeds max connection age", async () => {
     let connections = 0
     await using server = await createWebSocketServer((socket) => {
@@ -829,6 +876,39 @@ async function createWebSocketServer(onConnection: (socket: WebSocket, request: 
   const server = new WebSocketServer({ server: http.server })
   server.on("connection", onConnection)
   return websocketServerHandle(server, http)
+}
+
+async function createBlackholeProxy(target: string) {
+  const port = Number(new URL(target).port)
+  const dead = new Set<Socket>()
+  const sockets = new Set<Socket>()
+  const server = net.createServer((client) => {
+    const upstream = net.connect(port, "127.0.0.1")
+    sockets.add(client)
+    sockets.add(upstream)
+    client.on("data", (chunk) => {
+      if (!dead.has(client)) upstream.write(chunk)
+    })
+    upstream.on("data", (chunk) => {
+      if (!dead.has(client)) client.write(chunk)
+    })
+    client.on("error", () => {})
+    upstream.on("error", () => {})
+    client.on("close", () => upstream.destroy())
+    upstream.on("close", () => client.destroy())
+  })
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
+  const address = server.address() as AddressInfo
+  return {
+    url: `http://127.0.0.1:${address.port}/v1/responses`,
+    blackholeExisting() {
+      for (const socket of sockets) dead.add(socket)
+    },
+    async [Symbol.asyncDispose]() {
+      for (const socket of sockets) socket.destroy()
+      server.close()
+    },
+  }
 }
 
 async function createHangingTcpServer() {

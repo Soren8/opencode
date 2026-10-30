@@ -12,6 +12,9 @@ export interface CreateWebSocketFetchOptions {
   idleTimeout?: number
   maxConnectionAge?: number
   streamRetries?: number
+  streamIdleTimeout?: number
+  probeAfter?: number
+  probeTimeout?: number
 }
 
 interface PoolEntry {
@@ -26,6 +29,13 @@ interface PoolEntry {
 const DEFAULT_CONNECT_TIMEOUT = 15_000
 const DEFAULT_IDLE_TIMEOUT = 5 * 60 * 1000
 const DEFAULT_MAX_CONNECTION_AGE = 55 * 60 * 1000
+// A link that died silently (e.g. after a wifi hop) keeps reading OPEN, so it only surfaces through
+// a stalled stream. Match the SSE chunk timeout instead of waiting the full pool idle window.
+const DEFAULT_STREAM_IDLE_TIMEOUT = 120_000
+// Ping pooled sockets that sat unused for a while before sending on them, so a dead link is replaced
+// up front instead of swallowing the request.
+const DEFAULT_PROBE_AFTER = 5_000
+const DEFAULT_PROBE_TIMEOUT = 5_000
 const CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached"
 
 export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
@@ -35,6 +45,11 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
   const idleTimeout = options?.idleTimeout ?? DEFAULT_IDLE_TIMEOUT
   const maxConnectionAge = options?.maxConnectionAge ?? DEFAULT_MAX_CONNECTION_AGE
   const streamRetries = options?.streamRetries ?? 5
+  const streamIdleTimeout = options?.streamIdleTimeout ?? options?.idleTimeout ?? DEFAULT_STREAM_IDLE_TIMEOUT
+  const probe = {
+    after: options?.probeAfter ?? DEFAULT_PROBE_AFTER,
+    timeout: options?.probeTimeout ?? DEFAULT_PROBE_TIMEOUT,
+  }
   const pruneTimer = setInterval(() => prune(), Math.min(idleTimeout, 60_000))
   if (typeof pruneTimer === "object" && "unref" in pruneTimer && typeof pruneTimer.unref === "function") {
     pruneTimer.unref()
@@ -79,6 +94,7 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
       return httpFetch(input, httpInit)
     }
 
+    const idleFor = Date.now() - entry.lastUsedAt
     entry.busy = true
     entry.lastUsedAt = Date.now()
     try {
@@ -88,6 +104,7 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
         OpenAIWebSocket.normalizeHeaders(httpInit?.headers),
         connectTimeout,
         maxConnectionAge,
+        idleFor >= probe.after ? probe.timeout : undefined,
         init?.signal,
       )
       let resolveFirstEvent: (event: boolean | OpenAIWebSocket.WrappedError) => void = () => {}
@@ -99,7 +116,7 @@ export function createWebSocketFetch(options?: CreateWebSocketFetchOptions) {
       const response = OpenAIWebSocket.streamResponsesWebSocket({
         socket: entry.socket,
         body,
-        idleTimeout,
+        idleTimeout: streamIdleTimeout,
         signal: init?.signal ?? undefined,
         onFirstEvent: (error) => resolveFirstEvent(error ?? true),
         onTerminal: (event) => {
@@ -220,12 +237,14 @@ async function socket(
   headers: Record<string, string>,
   connectTimeout: number,
   maxConnectionAge: number,
+  probeTimeout: number | undefined,
   signal?: AbortSignal | null,
 ) {
   if (
     entry.socket?.readyState === WebSocket.OPEN &&
     entry.connectedAt &&
-    Date.now() - entry.connectedAt < maxConnectionAge
+    Date.now() - entry.connectedAt < maxConnectionAge &&
+    (probeTimeout === undefined || (await answersPing(entry.socket, probeTimeout)))
   ) {
     return entry.socket
   }
@@ -239,6 +258,23 @@ async function socket(
   })
   entry.connectedAt = Date.now()
   return next
+}
+
+function answersPing(socket: WebSocket, timeout: number) {
+  return new Promise<boolean>((resolve) => {
+    const done = (alive: boolean) => {
+      clearTimeout(timer)
+      socket.off("pong", onPong)
+      socket.off("close", onClose)
+      resolve(alive)
+    }
+    const onPong = () => done(true)
+    const onClose = () => done(false)
+    const timer = setTimeout(() => done(false), timeout)
+    socket.on("pong", onPong)
+    socket.on("close", onClose)
+    socket.ping()
+  })
 }
 
 function invalidate(entry: PoolEntry) {

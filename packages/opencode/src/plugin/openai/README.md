@@ -14,8 +14,10 @@ Enabled by default on `local`, `dev`, and `beta`. On `latest` and `prod`, set `O
 ## Lifetime
 
 - Connect timeout: 15 seconds.
-- Idle timeout: 5 minutes.
+- Pool idle timeout: 5 minutes.
+- Stream idle timeout: 2 minutes without an event fails the stream as retryable.
 - After a completed response, keep the socket for reuse.
+- Before reusing a socket that sat unused for 5 seconds or more, ping it; if no pong arrives within 5 seconds, replace it. A link that died silently, such as after a wifi hop, still reads `OPEN`.
 - Reuse a socket for up to 55 minutes, then replace it on the next request.
 
 ## Retries
