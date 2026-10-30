@@ -646,8 +646,23 @@ const layer = Layer.effect(
         ctx.needsCompaction = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
+        // A retry replays the same request, so the model regenerates everything a failed attempt wrote,
+        // including tool calls the AI SDK already ran. Drop that attempt's parts so they aren't duplicated.
+        const existing = new Set(
+          (yield* MessageV2.parts(ctx.assistantMessage.id).pipe(Effect.provideService(Database.Service, database))).map(
+            (part) => part.id,
+          ),
+        )
+
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
+            yield* Effect.forEach(
+              (yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+                Effect.provideService(Database.Service, database),
+              )).filter((part) => !existing.has(part.id)),
+              (part) => session.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id }),
+              { discard: true },
+            )
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })

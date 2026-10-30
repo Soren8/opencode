@@ -514,6 +514,67 @@ it.live("session.processor effect tests reset reasoning state across retries", (
   ),
 )
 
+it.live("session.processor effect tests drop partial parts from a failed attempt before retrying", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+
+        yield* llm.push(
+          raw({
+            chunks: [
+              { id: "chatcmpl-partial", object: "chat.completion.chunk", choices: [{ delta: { role: "assistant" } }] },
+              {
+                id: "chatcmpl-partial",
+                object: "chat.completion.chunk",
+                choices: [{ delta: { reasoning_content: "think one" } }],
+              },
+              { id: "chatcmpl-partial", object: "chat.completion.chunk", choices: [{ delta: { content: "partial" } }] },
+              { error: { type: "server_error", code: "server_error", message: "midstream drop" } },
+            ],
+          }),
+          reply().reason("think two").text("final").stop(),
+        )
+
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "drop partial")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+        const handle = yield* processors.create({
+          assistantMessage: msg,
+          sessionID: chat.id,
+          model: mdl,
+        })
+
+        const value = yield* handle.process({
+          user: {
+            id: parent.id,
+            sessionID: chat.id,
+            role: "user",
+            time: parent.time,
+            agent: parent.agent,
+            model: { providerID: ref.providerID, modelID: ref.modelID },
+          } satisfies SessionV1.User,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "drop partial" }],
+          tools: {},
+        })
+
+        const parts = yield* MessageV2.parts(msg.id)
+
+        expect(value).toBe("continue")
+        expect(yield* llm.calls).toBe(2)
+        expect(parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual(["final"])
+        expect(parts.filter((part) => part.type === "reasoning").map((part) => part.text)).toEqual(["think two"])
+        expect(parts.filter((part) => part.type === "step-start")).toHaveLength(1)
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
 it.live("session.processor effect tests do not retry unknown json errors", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
