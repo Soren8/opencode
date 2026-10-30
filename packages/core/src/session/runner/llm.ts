@@ -8,7 +8,7 @@ import {
   isContextOverflowFailure,
   type ProviderErrorEvent,
 } from "@opencode-ai/llm"
-import { Cause, DateTime, Effect, FiberSet, Layer, Option, Semaphore, Stream } from "effect"
+import { Cause, DateTime, Duration, Effect, FiberSet, Layer, Option, Random, Semaphore, Stream } from "effect"
 import { AgentV2 } from "../../agent"
 import { Config } from "../../config"
 import { Database } from "../../database/database"
@@ -52,7 +52,8 @@ import { llmClient } from "../../effect/app-node-platform"
  *   - [ ] Mark busy, retrying, idle, interrupted, or terminal-failure status durably.
  *   - [ ] Honor interruption and reject stale work after runtime attachment replacement.
  *   - [x] Honor optional agent step limits.
- *   - [ ] Bound provider retries and repeated identical tool calls.
+ *   - [x] Bound in-process retries of transient provider failures before the turn commits output.
+ *   - [ ] Bound repeated identical tool calls.
  *
  * - Runtime context assembly
  *   - Track V1 runtime-context parity canonically in `specs/v2/session.md`.
@@ -154,6 +155,8 @@ const layer = Layer.effect(
       | { readonly _tag: "ContinueAfterCompaction"; readonly step: number }
       // Overflow compaction completed; rebuild once through the path without overflow recovery.
       | { readonly _tag: "ContinueAfterOverflowCompaction"; readonly step: number }
+      // Provider failed transiently before this turn committed output; rebuild after backoff.
+      | { readonly _tag: "RetryAfterTransientFailure"; readonly step: number; readonly delay: Duration.Duration }
 
     class TurnTransitionError extends Error {
       constructor(readonly transition: TurnTransition) {
@@ -164,6 +167,8 @@ const layer = Layer.effect(
     const continueAfterCompaction = (step: number) => new TurnTransitionError({ _tag: "ContinueAfterCompaction", step })
     const continueAfterOverflowCompaction = (step: number) =>
       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
+    const retryAfterTransientFailure = (step: number, delay: Duration.Duration) =>
+      new TurnTransitionError({ _tag: "RetryAfterTransientFailure", step, delay })
 
     const loadSystemContext = (agent: AgentV2.Selection) =>
       Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
@@ -174,6 +179,7 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
+      retries: number,
       recoverOverflow?: typeof compaction.compactAfterOverflow,
     ) {
       const session = yield* getSession(sessionID)
@@ -295,6 +301,19 @@ const layer = Layer.effect(
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
           if (overflowFailure) yield* publish(overflowFailure)
           const llmFailure = failure instanceof LLMError ? failure : undefined
+          if (
+            llmFailure &&
+            !overflowFailure &&
+            !publisher.hasAssistantStarted() &&
+            !publisher.hasProviderError() &&
+            stream._tag === "Failure" &&
+            !Cause.hasInterrupts(stream.cause) &&
+            isTransientFailure(llmFailure) &&
+            retries < retryBudget(llmFailure)
+          )
+            return yield* Effect.die(
+              retryAfterTransientFailure(currentStep, yield* retryDelay(retries + 1, llmFailure)),
+            )
           if (llmFailure && !publisher.hasProviderError()) {
             yield* withPublication(publisher.failUnsettledTools("Provider did not return a tool result", true))
             yield* withPublication(publisher.failAssistant(llmFailure.reason.message))
@@ -357,15 +376,20 @@ const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
+      retries?: number,
     ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
 
-    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step).pipe(
+    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, retries = 0) {
+      return yield* runTurnAttempt(sessionID, promotion, step, retries).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
               return yield* Effect.die("Post-compaction provider attempt cannot recover another overflow")
+            if (defect.transition._tag === "RetryAfterTransientFailure") {
+              yield* Effect.sleep(defect.transition.delay)
+              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step, retries + 1)
+            }
             yield* Effect.yieldNow
             return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
           }),
@@ -373,11 +397,15 @@ const layer = Layer.effect(
       )
     })
 
-    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow).pipe(
+    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step, retries = 0) {
+      return yield* runTurnAttempt(sessionID, promotion, step, retries, compaction.compactAfterOverflow).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
+            if (defect.transition._tag === "RetryAfterTransientFailure") {
+              yield* Effect.sleep(defect.transition.delay)
+              return yield* runTurn(sessionID, undefined, defect.transition.step, retries + 1)
+            }
             yield* Effect.yieldNow
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
               return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
@@ -417,6 +445,27 @@ const layer = Layer.effect(
     })
   }),
 )
+
+// Matches V1 SessionRetry: connectivity failures without an HTTP status get about five minutes of
+// capped backoff so a session survives a network hop; status failures keep the shorter budget.
+const RETRY_INITIAL_DELAY = 2_000
+const RETRY_MAX_DELAY = 30_000
+const RETRY_MAX_RETRIES = 5
+const RETRY_MAX_NETWORK_RETRIES = 13
+
+function isTransientFailure(failure: LLMError) {
+  return failure.reason._tag === "Transport" || failure.retryable
+}
+
+function retryBudget(failure: LLMError) {
+  return failure.reason._tag === "Transport" ? RETRY_MAX_NETWORK_RETRIES : RETRY_MAX_RETRIES
+}
+
+const retryDelay = Effect.fnUntraced(function* (attempt: number, failure: LLMError) {
+  if (failure.retryAfterMs !== undefined) return Duration.millis(failure.retryAfterMs)
+  const base = RETRY_INITIAL_DELAY * 2 ** (attempt - 1)
+  return Duration.millis(Math.min(Math.ceil(base * (1 + 0.25 * (yield* Random.next))), RETRY_MAX_DELAY))
+})
 
 export const node = makeLocationNode({
   service: Service,

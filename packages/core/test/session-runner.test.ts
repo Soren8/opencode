@@ -6,6 +6,8 @@ import {
   Model,
   TransportReason,
   InvalidRequestReason,
+  UnknownProviderReason,
+  ProviderInternalReason,
   type LLMClientShape,
   type LLMRequest,
 } from "@opencode-ai/llm"
@@ -55,7 +57,8 @@ import { ReferenceGuidance } from "@opencode-ai/core/reference/guidance"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Location } from "@opencode-ai/core/location"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { Cause, DateTime, Deferred, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import { Cause, DateTime, Deferred, Duration, Effect, Exit, Fiber, Layer, Schema, Stream } from "effect"
+import * as TestClock from "effect/testing/TestClock"
 import { asc, eq } from "drizzle-orm"
 import { testEffect } from "./lib/effect"
 
@@ -342,7 +345,20 @@ const providerUnavailable = () =>
   new LLMError({
     module: "test",
     method: "stream",
-    reason: new TransportReason({ message: "Provider unavailable" }),
+    reason: new UnknownProviderReason({ message: "Provider unavailable" }),
+  })
+
+const networkDropped = () =>
+  new LLMError({
+    module: "test",
+    method: "stream",
+    reason: new TransportReason({ message: "HTTP transport failed" }),
+  })
+
+const awaitWithClock = <A, E>(fiber: Fiber.Fiber<A, E>) =>
+  Effect.gen(function* () {
+    while (fiber.pollUnsafe() === undefined) yield* TestClock.adjust(Duration.seconds(1))
+    return yield* Fiber.await(fiber)
   })
 
 const setupOverflowRecovery = Effect.gen(function* () {
@@ -3219,6 +3235,119 @@ describe("SessionRunnerLLM", () => {
           content: [{ type: "text", text: "Partial" }],
         },
       ])
+    }),
+  )
+
+  it.effect("retries a transport failure before any provider output with a fresh request", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Survive wifi hop" }), resume: false })
+      requests.length = 0
+      responseStream = Stream.fail(networkDropped())
+      response = [
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.textStart({ id: "text-retried" }),
+        LLMEvent.textDelta({ id: "text-retried", text: "Back online" }),
+        LLMEvent.textEnd({ id: "text-retried" }),
+        LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+        LLMEvent.finish({ reason: "stop" }),
+      ]
+
+      const exit = yield* awaitWithClock(yield* session.resume(sessionID).pipe(Effect.forkChild))
+
+      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(requests).toHaveLength(2)
+      expect(userTexts(requests[1]!)).toEqual(["Survive wifi hop"])
+      yield* replaySessionProjection(sessionID)
+      expect(yield* session.context(sessionID)).toEqual([
+        expect.objectContaining({ type: "user", text: "Survive wifi hop" }),
+        expect.objectContaining({
+          type: "assistant",
+          finish: "stop",
+          content: [expect.objectContaining({ type: "text", text: "Back online" })],
+        }),
+      ])
+    }),
+  )
+
+  it.effect("stops retrying transport failures after the network retry budget", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Stay offline" }), resume: false })
+      requests.length = 0
+      const failure = networkDropped()
+      streamFailure = failure
+
+      const exit = yield* awaitWithClock(yield* session.resume(sessionID).pipe(Effect.forkChild))
+
+      expect(Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined).toBe(failure)
+      expect(requests).toHaveLength(14)
+      yield* replaySessionProjection(sessionID)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", text: "Stay offline" },
+        { type: "assistant", finish: "error", error: { type: "unknown", message: "HTTP transport failed" } },
+      ])
+    }),
+  )
+
+  it.effect("stops retrying retryable provider status failures after the status retry budget", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Overloaded" }), resume: false })
+      requests.length = 0
+      const failure = new LLMError({
+        module: "test",
+        method: "stream",
+        reason: new ProviderInternalReason({ message: "Overloaded", status: 503, retryAfterMs: 1_000 }),
+      })
+      streamFailure = failure
+
+      const exit = yield* awaitWithClock(yield* session.resume(sessionID).pipe(Effect.forkChild))
+
+      expect(Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined).toBe(failure)
+      expect(requests).toHaveLength(6)
+    }),
+  )
+
+  it.effect("does not retry a transport failure after provider output was committed", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Drop mid stream" }), resume: false })
+      requests.length = 0
+      const failure = networkDropped()
+      responseStream = Stream.concat(
+        Stream.fromIterable([
+          LLMEvent.stepStart({ index: 0 }),
+          LLMEvent.textStart({ id: "text-partial" }),
+          LLMEvent.textDelta({ id: "text-partial", text: "Partial" }),
+        ]),
+        Stream.fail(failure),
+      )
+
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBe(failure)
+      expect(requests).toHaveLength(1)
+      expect(yield* session.context(sessionID)).toMatchObject([
+        { type: "user", text: "Drop mid stream" },
+        { type: "assistant", finish: "error", error: { type: "unknown", message: "HTTP transport failed" } },
+      ])
+    }),
+  )
+
+  it.effect("does not retry non-retryable provider failures", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Rejected" }), resume: false })
+      requests.length = 0
+      const failure = providerUnavailable()
+      streamFailure = failure
+
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBe(failure)
+      expect(requests).toHaveLength(1)
     }),
   )
 
