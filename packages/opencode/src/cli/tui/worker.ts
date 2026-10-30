@@ -3,13 +3,13 @@ import { InstanceRuntime } from "@/project/instance-runtime"
 import { Rpc } from "@/util/rpc"
 import { upgrade } from "@/cli/upgrade"
 import { Config } from "@/config/config"
-import { GlobalBus } from "@/bus/global"
 import { ServerAuth } from "@/server/auth"
 import { writeHeapSnapshot } from "node:v8"
 import { Heap } from "@/cli/heap"
 import { AppRuntime } from "@/effect/app-runtime"
 import { Effect } from "effect"
 import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecycle"
+import { forwardGlobalEvents } from "./forward"
 
 Heap.start()
 
@@ -20,10 +20,7 @@ const onUncaughtException = (_error: Error) => {}
 process.on("unhandledRejection", onUnhandledRejection)
 process.on("uncaughtException", onUncaughtException)
 
-// Subscribe to global events and forward them via RPC
-GlobalBus.on("event", (event) => {
-  Rpc.emit("global.event", event)
-})
+forwardGlobalEvents((event) => Rpc.emit("global.event", event))
 
 let server: Awaited<ReturnType<typeof Server.listen>> | undefined
 
