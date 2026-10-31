@@ -1,36 +1,159 @@
-import yargs from "yargs"
+import yargs, { type Argv } from "yargs"
 import { hideBin } from "yargs/helpers"
-import { RunCommand } from "./cli/cmd/run"
-import { GenerateCommand } from "./cli/cmd/generate"
-import { ConsoleCommand } from "./cli/cmd/account"
-import { ProvidersCommand } from "./cli/cmd/providers"
-import { AgentCommand } from "./cli/cmd/agent"
-import { UpgradeCommand } from "./cli/cmd/upgrade"
-import { UninstallCommand } from "./cli/cmd/uninstall"
-import { ModelsCommand } from "./cli/cmd/models"
 import { UI } from "./cli/ui"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { FormatError } from "./cli/error"
-import { ServeCommand } from "./cli/cmd/serve"
-import { DebugCommand } from "./cli/cmd/debug"
-import { StatsCommand } from "./cli/cmd/stats"
-import { McpCommand } from "./cli/cmd/mcp"
-import { GithubCommand } from "./cli/cmd/github"
-import { ExportCommand } from "./cli/cmd/export"
-import { ImportCommand } from "./cli/cmd/import"
-import { AttachCommand } from "./cli/cmd/attach"
-import { TuiThreadCommand } from "./cli/cmd/tui"
-import { AcpCommand } from "./cli/cmd/acp"
 import { EOL } from "os"
-import { WebCommand } from "./cli/cmd/web"
-import { PrCommand } from "./cli/cmd/pr"
-import { SessionCommand } from "./cli/cmd/session"
-import { DbCommand } from "./cli/cmd/db"
 import { errorMessage } from "./util/error"
-import { PluginCommand } from "./cli/cmd/plug"
 import { Heap } from "./cli/heap"
 
 const args = hideBin(process.argv)
+// Command modules import most of the server graph, so load only the one being run.
+const loaders = {
+  acp: async (cli: Argv) => {
+    const { AcpCommand } = await import("./cli/cmd/acp")
+    return cli.command(AcpCommand)
+  },
+  mcp: async (cli: Argv) => {
+    const { McpCommand } = await import("./cli/cmd/mcp")
+    return cli.command(McpCommand)
+  },
+  $0: async (cli: Argv) => {
+    const { TuiThreadCommand } = await import("./cli/cmd/tui")
+    return cli.command(TuiThreadCommand)
+  },
+  attach: async (cli: Argv) => {
+    const { AttachCommand } = await import("./cli/cmd/attach")
+    return cli.command(AttachCommand)
+  },
+  run: async (cli: Argv) => {
+    const { RunCommand } = await import("./cli/cmd/run")
+    return cli.command(RunCommand)
+  },
+  generate: async (cli: Argv) => {
+    const { GenerateCommand } = await import("./cli/cmd/generate")
+    return cli.command(GenerateCommand)
+  },
+  debug: async (cli: Argv) => {
+    const { DebugCommand } = await import("./cli/cmd/debug")
+    return cli.command(DebugCommand)
+  },
+  console: async (cli: Argv) => {
+    const { ConsoleCommand } = await import("./cli/cmd/account")
+    return cli.command(ConsoleCommand)
+  },
+  providers: async (cli: Argv) => {
+    const { ProvidersCommand } = await import("./cli/cmd/providers")
+    return cli.command(ProvidersCommand)
+  },
+  agent: async (cli: Argv) => {
+    const { AgentCommand } = await import("./cli/cmd/agent")
+    return cli.command(AgentCommand)
+  },
+  upgrade: async (cli: Argv) => {
+    const { UpgradeCommand } = await import("./cli/cmd/upgrade")
+    return cli.command(UpgradeCommand)
+  },
+  uninstall: async (cli: Argv) => {
+    const { UninstallCommand } = await import("./cli/cmd/uninstall")
+    return cli.command(UninstallCommand)
+  },
+  serve: async (cli: Argv) => {
+    const { ServeCommand } = await import("./cli/cmd/serve")
+    return cli.command(ServeCommand)
+  },
+  web: async (cli: Argv) => {
+    const { WebCommand } = await import("./cli/cmd/web")
+    return cli.command(WebCommand)
+  },
+  models: async (cli: Argv) => {
+    const { ModelsCommand } = await import("./cli/cmd/models")
+    return cli.command(ModelsCommand)
+  },
+  stats: async (cli: Argv) => {
+    const { StatsCommand } = await import("./cli/cmd/stats")
+    return cli.command(StatsCommand)
+  },
+  export: async (cli: Argv) => {
+    const { ExportCommand } = await import("./cli/cmd/export")
+    return cli.command(ExportCommand)
+  },
+  import: async (cli: Argv) => {
+    const { ImportCommand } = await import("./cli/cmd/import")
+    return cli.command(ImportCommand)
+  },
+  github: async (cli: Argv) => {
+    const { GithubCommand } = await import("./cli/cmd/github")
+    return cli.command(GithubCommand)
+  },
+  pr: async (cli: Argv) => {
+    const { PrCommand } = await import("./cli/cmd/pr")
+    return cli.command(PrCommand)
+  },
+  session: async (cli: Argv) => {
+    const { SessionCommand } = await import("./cli/cmd/session")
+    return cli.command(SessionCommand)
+  },
+  plugin: async (cli: Argv) => {
+    const { PluginCommand } = await import("./cli/cmd/plug")
+    return cli.command(PluginCommand)
+  },
+  db: async (cli: Argv) => {
+    const { DbCommand } = await import("./cli/cmd/db")
+    return cli.command(DbCommand)
+  },
+}
+const aliases: Record<string, keyof typeof loaders> = { auth: "providers", plug: "plugin" }
+
+function selectCommands() {
+  const flags = args.slice(0, args.includes("--") ? args.indexOf("--") : undefined)
+  const token = commandToken(flags)
+  if (token === "completion" || flags.includes("--get-yargs-completions")) return Object.values(loaders)
+  if (
+    flags.some(
+      (flag, index) =>
+        ["-v", "--version", "-v=true", "--version=true"].includes(flag) &&
+        !((flag === "-v" || flag === "--version") && flags[index + 1] === "false"),
+    )
+  )
+    return []
+  const name = token === undefined ? undefined : (aliases[token] ?? token)
+  if (name !== undefined && name !== "$0" && Object.hasOwn(loaders, name))
+    return [loaders[name as keyof typeof loaders]]
+  if (
+    flags.some(
+      (flag, index) =>
+        ["-h", "--help", "-h=true", "--help=true"].includes(flag) &&
+        !((flag === "-h" || flag === "--help") && flags[index + 1] === "false"),
+    )
+  )
+    return Object.values(loaders)
+  return [loaders.$0]
+}
+
+// The command name is the first token after global flags; anything else falls through to the default TUI command.
+function commandToken(flags: string[]): string | undefined {
+  const head = flags[0]
+  const next = flags[1]
+  if (head === "--pure" || head === "--print-logs")
+    return commandToken(next === "true" || next === "false" ? flags.slice(2) : flags.slice(1))
+  if (
+    head === "--no-print-logs" ||
+    head === "--no-pure" ||
+    head?.startsWith("--print-logs=") ||
+    head?.startsWith("--pure=") ||
+    head === "--help=false" ||
+    head === "--version=false" ||
+    head === "-h=false" ||
+    head === "-v=false" ||
+    head?.startsWith("--log-level=")
+  )
+    return commandToken(flags.slice(1))
+  if ((head === "--help" || head === "--version" || head === "-h" || head === "-v") && next === "false")
+    return commandToken(flags.slice(2))
+  if (head === "--log-level") return commandToken(flags.slice(2))
+  return head
+}
 
 function show(out: string) {
   const text = out.trimStart()
@@ -78,29 +201,10 @@ const cli = yargs(args)
   })
   .usage("")
   .completion("completion", "generate shell completion script")
-  .command(AcpCommand)
-  .command(McpCommand)
-  .command(TuiThreadCommand)
-  .command(AttachCommand)
-  .command(RunCommand)
-  .command(GenerateCommand)
-  .command(DebugCommand)
-  .command(ConsoleCommand)
-  .command(ProvidersCommand)
-  .command(AgentCommand)
-  .command(UpgradeCommand)
-  .command(UninstallCommand)
-  .command(ServeCommand)
-  .command(WebCommand)
-  .command(ModelsCommand)
-  .command(StatsCommand)
-  .command(ExportCommand)
-  .command(ImportCommand)
-  .command(GithubCommand)
-  .command(PrCommand)
-  .command(SessionCommand)
-  .command(PluginCommand)
-  .command(DbCommand)
+
+for (const load of selectCommands()) await load(cli)
+
+cli
   .fail((msg, err) => {
     if (
       msg?.startsWith("Unknown argument") ||
