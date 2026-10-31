@@ -148,6 +148,9 @@ export const {
     const sdk = useSDK()
 
     const fullSyncedSessions = new Set<string>()
+    // The full provider catalog is megabytes; only provider dialogs need it, so it loads on demand.
+    let providerList: Promise<void> | undefined
+    let providerListRequested = false
     const syncingSessions = new Map<string, Promise<void>>()
     const hydratingSessions = new Map<string, { messages: Set<string>; parts: Set<string> }>()
     const touchMessage = (sessionID: string, messageID: string) => {
@@ -171,6 +174,22 @@ export const {
       return sdk.client.session
         .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
         .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+    }
+
+    function loadProviderList() {
+      providerListRequested = true
+      if (providerList) return providerList
+      const task = sdk.client.provider
+        .list({ workspace: project.workspace.current() }, { throwOnError: true })
+        .then((x) => {
+          if (providerList !== task) return
+          setStore("provider_next", reconcile(x.data!))
+        })
+      task.catch(() => {
+        if (providerList === task) providerList = undefined
+      })
+      providerList = task
+      return task
     }
 
     event.subscribe((event, { directory, workspace }) => {
@@ -450,13 +469,14 @@ export const {
 
     async function bootstrap(input: { fatal?: boolean } = {}) {
       const fatal = input.fatal ?? true
+      providerList = undefined
+      setStore("provider_next", reconcile({ all: [], default: {}, connected: [] }))
       const workspace = project.workspace.current()
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
 
       // blocking - include session.list when continuing a session
       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
-      const providerListPromise = sdk.client.provider.list({ workspace }, { throwOnError: true })
       const capabilitiesPromise = sdk.client.experimental.capabilities
         .get({ workspace }, { throwOnError: true })
         .then((x) => x.data)
@@ -469,7 +489,6 @@ export const {
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
       await Promise.all([
         providersPromise,
-        providerListPromise,
         capabilitiesPromise,
         agentsPromise,
         configPromise,
@@ -478,7 +497,6 @@ export const {
       ])
         .then(async () => {
           const providersResponse = providersPromise.then((x) => x.data!)
-          const providerListResponse = providerListPromise.then((x) => x.data!)
           const capabilitiesResponse = capabilitiesPromise
           const consoleStateResponse = consoleStatePromise
           const agentsResponse = agentsPromise.then((x) => x.data ?? [])
@@ -487,7 +505,6 @@ export const {
 
           return Promise.all([
             providersResponse,
-            providerListResponse,
             capabilitiesResponse,
             consoleStateResponse,
             agentsResponse,
@@ -495,17 +512,15 @@ export const {
             ...(sessionListResponse ? [sessionListResponse] : []),
           ]).then((responses) => {
             const providers = responses[0]
-            const providerList = responses[1]
-            const capabilities = responses[2]
-            const consoleState = responses[3]
-            const agents = responses[4]
-            const config = responses[5]
-            const sessions = responses[6]
+            const capabilities = responses[1]
+            const consoleState = responses[2]
+            const agents = responses[3]
+            const config = responses[4]
+            const sessions = responses[5]
 
             batch(() => {
               setStore("provider", reconcile(providers.providers))
               setStore("provider_default", reconcile(providers.default))
-              setStore("provider_next", reconcile(providerList))
               setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
               setStore("console_state", reconcile(consoleState))
               setStore("agent", reconcile(agents))
@@ -516,6 +531,7 @@ export const {
         })
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
+          if (providerListRequested) void loadProviderList().catch(() => {})
           // non-blocking
           void Promise.all([
             ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
@@ -576,6 +592,9 @@ export const {
       },
       get path() {
         return project.instance.path()
+      },
+      provider: {
+        load: loadProviderList,
       },
       session: {
         get(sessionID: string) {

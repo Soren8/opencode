@@ -4,7 +4,6 @@ import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { Provider } from "@/provider/provider"
 import { Auth } from "@/auth"
 
-import { mapValues } from "remeda"
 import { Effect, Schema } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiBuilder } from "effect/unstable/httpapi"
@@ -44,20 +43,24 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
       const all = yield* ModelsDev.Service.use((s) => s.get())
       const disabled = new Set(config.disabled_providers ?? [])
       const enabled = config.enabled_providers ? new Set(config.enabled_providers) : undefined
-      const filtered: Record<string, (typeof all)[string]> = {}
-      for (const [key, value] of Object.entries(all)) {
+      const catalog = Provider.catalog(all)
+      const filtered: Record<string, Provider.Info> = {}
+      for (const [key, value] of Object.entries(catalog)) {
         if ((enabled ? enabled.has(key) : true) && !disabled.has(key)) filtered[key] = value
       }
       const connected = yield* provider.list()
       const credentials = yield* authStore.all().pipe(Effect.orDie)
-      const providers = Object.assign(
-        mapValues(filtered, (item) => Provider.fromModelsDevProvider(item)),
-        connected,
-      )
+      const providers = Object.assign(filtered, connected)
       return {
-        all: Object.values(providers).map(Provider.toPublicInfo),
+        // Catalog entries are plain models.dev data; only instance-loaded providers can carry
+        // functions or plugin-built models that need sanitizing.
+        all: Object.values(providers).map((item) =>
+          Object.hasOwn(connected, item.id) ? Provider.toPublicInfo(item) : item,
+        ),
         default: Provider.defaultModelIDs(providers),
-        connected: Object.keys(providers).filter((id) => id in connected || credentials[id]),
+        connected: Object.keys(providers).filter(
+          (id) => Object.hasOwn(connected, id) || Object.hasOwn(credentials, id),
+        ),
       }
     })
 

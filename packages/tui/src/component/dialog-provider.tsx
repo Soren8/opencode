@@ -49,7 +49,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
     ...pipe(
       list,
       sortBy(
-        (x) => PROVIDER_PRIORITY[x.id] ?? 99,
+        (x) => (Object.hasOwn(PROVIDER_PRIORITY, x.id) ? PROVIDER_PRIORITY[x.id] : 99),
         (x) => x.name.toLowerCase(),
         (x) => x.id,
       ),
@@ -64,7 +64,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
           openai: "(ChatGPT Plus/Pro or API key)",
           "opencode-go": "Low cost subscription for everyone",
         }[provider.id],
-        category: provider.id in PROVIDER_PRIORITY ? "Popular" : "Providers",
+        category: Object.hasOwn(PROVIDER_PRIORITY, provider.id) ? "Popular" : "Providers",
       })),
     ),
     {
@@ -83,13 +83,17 @@ export function normalizeCustomProviderID(value: string) {
   return providerID
 }
 
-export function createDialogProviderOptions() {
+export function createDialogProviderOptions(input: { loadProviders?: boolean } = {}) {
   const sync = useSync()
   const dialog = useDialog()
   const sdk = useSDK()
   const toast = useToast()
   const { theme } = useTheme()
   const onboarded = useConnected()
+
+  onMount(() => {
+    if (input.loadProviders || !onboarded()) sync.provider.load().catch(toast.error)
+  })
 
   async function promptCustomProviderID(): Promise<string | undefined> {
     const value = await DialogPrompt.show(dialog, "Other", {
@@ -226,7 +230,7 @@ export function createDialogProviderOptions() {
 }
 
 export function DialogProvider() {
-  const options = createDialogProviderOptions()
+  const options = createDialogProviderOptions({ loadProviders: true })
   return <DialogSelect title="Connect a provider" options={options()} />
 }
 
@@ -404,6 +408,7 @@ function ApiMethod(props: ApiMethodProps) {
         })
         await sdk.client.instance.dispose()
         await sync.bootstrap()
+        if (props.custom) await sync.provider.load()
         if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
           toast.show({
             variant: "info",

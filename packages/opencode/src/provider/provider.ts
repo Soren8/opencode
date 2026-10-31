@@ -1322,6 +1322,18 @@ function fromModelsDevModel(provider: ModelsDev.Provider, model: ModelsDev.Model
   }
 }
 
+const catalogs = new WeakMap<Record<string, ModelsDev.Provider>, Record<ProviderV2.ID, Info>>()
+
+// Shared by every instance in the process for one models.dev snapshot. Callers must treat it as
+// read-only; instance state copies a provider's models before anything mutates them.
+export function catalog(modelsDev: Record<string, ModelsDev.Provider>) {
+  const cached = catalogs.get(modelsDev)
+  if (cached) return cached
+  const built = mapValues(modelsDev, fromModelsDevProvider) as Record<ProviderV2.ID, Info>
+  catalogs.set(modelsDev, built)
+  return built
+}
+
 export function fromModelsDevProvider(provider: ModelsDev.Provider): Info {
   const models: Record<string, Model> = {}
   for (const [key, model] of Object.entries(provider.models)) {
@@ -1405,8 +1417,9 @@ const layer = Layer.effect(
         const bridge = yield* EffectBridge.make()
         const cfg = yield* config.get()
         const modelsDev = yield* modelsDevSvc.get()
-        const catalog = mapValues(modelsDev, fromModelsDevProvider)
-        const database = mapValues(catalog, toPublicInfo)
+        const shared = catalog(modelsDev)
+        const database: Record<ProviderV2.ID, Info> = { ...shared }
+        const owned = new Set<ProviderV2.ID>()
 
         const providers: Record<ProviderV2.ID, Info> = {} as Record<ProviderV2.ID, Info>
         const languages = new Map<string, LanguageModelV3>()
@@ -1427,14 +1440,26 @@ const layer = Layer.effect(
           get: (key: string) => env.get(key),
         }
 
+        // Copy a shared catalog entry before this instance mutates its models.
+        function own(providerID: ProviderV2.ID) {
+          const provider = Object.hasOwn(database, providerID) ? database[providerID] : undefined
+          if (!provider || owned.has(providerID)) return provider
+          owned.add(providerID)
+          database[providerID] = {
+            ...provider,
+            models: mapValues(provider.models, (model) => ({ ...model, api: { ...model.api } })),
+          }
+          return database[providerID]
+        }
+
         function mergeProvider(providerID: ProviderV2.ID, provider: Partial<Info>) {
-          const existing = providers[providerID]
+          const existing = Object.hasOwn(providers, providerID) ? providers[providerID] : undefined
           if (existing) {
             // @ts-expect-error
             providers[providerID] = mergeDeep(existing, provider)
             return
           }
-          const match = database[providerID]
+          const match = own(providerID)
           if (!match) return
           // @ts-expect-error
           providers[providerID] = mergeDeep(match, provider)
@@ -1466,24 +1491,28 @@ const layer = Layer.effect(
           if (!provider) continue
           const pluginAuth = yield* auth.get(providerID).pipe(Effect.orDie)
 
-          provider.models = yield* Effect.promise(async () => {
-            const next = await models(toPublicInfo(provider), { auth: pluginAuth })
-            return Object.fromEntries(
-              Object.entries(next).map(([id, model]) => [
-                id,
-                {
-                  ...model,
-                  id: ModelV2.ID.make(id),
-                  providerID,
-                },
-              ]),
-            )
-          })
+          owned.add(providerID)
+          database[providerID] = {
+            ...provider,
+            models: yield* Effect.promise(async () => {
+              const next = await models(toPublicInfo(provider), { auth: pluginAuth })
+              return Object.fromEntries(
+                Object.entries(next).map(([id, model]) => [
+                  id,
+                  {
+                    ...model,
+                    id: ModelV2.ID.make(id),
+                    providerID,
+                  },
+                ]),
+              )
+            }),
+          }
         }
 
         // extend database from config
         for (const [providerID, provider] of configProviders) {
-          const existing = database[providerID]
+          const existing = own(ProviderV2.ID.make(providerID))
           const parsed: Info = {
             id: ProviderV2.ID.make(providerID),
             name: provider.name ?? existing?.name ?? providerID,
@@ -1579,7 +1608,8 @@ const layer = Layer.effect(
             )
             parsed.models[modelID] = parsedModel
           }
-          database[providerID] = parsed
+          database[ProviderV2.ID.make(providerID)] = parsed
+          owned.add(ProviderV2.ID.make(providerID))
         }
 
         // load env
@@ -1621,7 +1651,7 @@ const layer = Layer.effect(
           const options = yield* Effect.promise(() =>
             plugin.auth!.loader!(
               () => bridge.promise(auth.get(providerID).pipe(Effect.orDie)) as any,
-              toPublicInfo(database[plugin.auth!.provider]),
+              toPublicInfo(database[providerID]),
             ),
           )
           const opts = options ?? {}
@@ -1632,7 +1662,7 @@ const layer = Layer.effect(
         for (const [id, fn] of Object.entries(custom(dep))) {
           const providerID = ProviderV2.ID.make(id)
           if (disabled.has(providerID)) continue
-          const data = database[providerID]
+          const data = own(providerID)
           if (!data) {
             continue
           }
@@ -1724,7 +1754,7 @@ const layer = Layer.effect(
         return {
           models: languages,
           providers,
-          catalog,
+          catalog: shared,
           sdk,
           modelLoaders,
           varsLoaders,
