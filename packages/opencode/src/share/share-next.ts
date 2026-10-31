@@ -10,6 +10,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { Provider } from "@/provider/provider"
 
 import { Session } from "@/session/session"
+import { SessionSummary } from "@/session/summary"
 import { MessageV2 } from "@/session/message-v2"
 import type { SessionID } from "@/session/schema"
 import { Database } from "@opencode-ai/core/database/database"
@@ -120,6 +121,16 @@ const layer = Layer.effect(
     const httpOk = HttpClient.filterStatusOk(http)
     const provider = yield* Provider.Service
     const session = yield* Session.Service
+    const summary = yield* SessionSummary.Service
+
+    const fullMessage = Effect.fnUntraced(function* (info: EventV2.Data<typeof MessageV2.Event.Updated>["info"]) {
+      if (info.role !== "user" || !info.summary?.diffs?.length) return structuredClone(info) as SDK.Message
+      const diffs = yield* summary.diff({ sessionID: info.sessionID, messageID: info.id })
+      return structuredClone({
+        ...info,
+        summary: { ...info.summary, diffs },
+      }) as SDK.Message
+    })
 
     function sync(sessionID: SessionID, data: Data[]) {
       return Effect.gen(function* () {
@@ -185,7 +196,9 @@ const layer = Layer.effect(
         yield* watch(MessageV2.Event.Updated, (data) =>
           Effect.gen(function* () {
             const info = data.info
-            yield* sync(info.sessionID, [{ type: "message", data: structuredClone(info) as SDK.Message }])
+            if (!(yield* getCached(info.sessionID))) return
+            const message = yield* fullMessage(info)
+            yield* sync(info.sessionID, [{ type: "message", data: message }])
             if (info.role !== "user") return
             const model = yield* provider.getModel(info.model.providerID, info.model.modelID)
             yield* sync(info.sessionID, [{ type: "model", data: [model] }])
@@ -272,10 +285,12 @@ const layer = Layer.effect(
     })
 
     const full = Effect.fn("ShareNext.full")(function* (sessionID: SessionID) {
+      if (!(yield* getCached(sessionID))) return
       yield* Effect.logInfo("full sync", { sessionID: sessionID })
       const info = yield* session.get(sessionID)
       const diffs = yield* session.diff(sessionID)
       const messages = yield* session.messages({ sessionID })
+      const fullMessages = yield* Effect.forEach(messages, (item) => fullMessage(item.info), { concurrency: 8 })
       const models = yield* Effect.forEach(
         Array.from(
           new Map(
@@ -291,7 +306,7 @@ const layer = Layer.effect(
 
       yield* sync(sessionID, [
         { type: "session", data: info },
-        ...messages.map((item) => ({ type: "message" as const, data: item.info })),
+        ...fullMessages.map((item) => ({ type: "message" as const, data: item })),
         ...messages.flatMap((item) => item.parts.map((part) => ({ type: "part" as const, data: part }))),
         { type: "session_diff", data: diffs },
         { type: "model", data: models },
@@ -365,7 +380,16 @@ const layer = Layer.effect(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [Account.node, EventV2Bridge.node, Config.node, Database.node, httpClient, Provider.node, Session.node],
+  deps: [
+    Account.node,
+    EventV2Bridge.node,
+    Config.node,
+    Database.node,
+    httpClient,
+    Provider.node,
+    Session.node,
+    SessionSummary.node,
+  ],
 })
 
 export * as ShareNext from "./share-next"

@@ -25,12 +25,21 @@ describe("diffs", () => {
     expect(diffs({ a: item })).toEqual([item])
   })
 
+  test("keeps stats-only diffs without patches for lazy loading", () => {
+    const stats = { file: "src/stats.ts", additions: 1, deletions: 1 }
+    expect(diffs([stats])).toEqual([stats])
+    expect(diffs(stats)).toEqual([stats])
+    expect(diffs({ a: stats })).toEqual([stats])
+  })
+
   test("drops invalid entries", () => {
     expect(
       diffs([
         item,
-        { file: "src/bad.ts", additions: 1, deletions: 1 },
+        { file: "src/bad.ts", additions: "1", deletions: 1, patch: item.patch },
         { patch: item.patch, additions: 1, deletions: 1 },
+        { file: "src/bad-patch.ts", additions: 1, deletions: 1, patch: 42 },
+        { file: "src/bad-status.ts", additions: 1, deletions: 1, status: "renamed" },
       ]),
     ).toEqual([item])
   })

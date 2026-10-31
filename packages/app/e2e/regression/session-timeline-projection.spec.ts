@@ -1,6 +1,8 @@
 import { expect, test } from "@playwright/test"
 import {
   assistantMessage,
+  directory,
+  projectID,
   setupTimeline,
   status,
   toolPart,
@@ -159,6 +161,216 @@ test.describe("session timeline projection", () => {
     await expect(page.getByText("Keep this stable", { exact: true })).toBeVisible()
     await expect(page.locator('[data-timeline-row="DiffSummary"]')).toBeVisible()
     await expect(page.getByText(/show all/i)).toBeVisible()
+  })
+
+  test("loads stats-only turn patches on expansion and reuses the message diff query", async ({ page }) => {
+    const files = ["src/first.ts", "src/second.ts"]
+    const user = userMessage(undefined, {
+      summary: { diffs: files.map((file) => ({ file, additions: 1, deletions: 1 })) },
+    })
+    await setupTimeline(page, { messages: [user, assistantMessage()] })
+
+    let requests = 0
+    await page.route(/(?:\/api)?\/session\/[^/]+\/diff(?:\?.*)?$/, (route) => {
+      requests += 1
+      const diffs = files.map((file) => ({
+        file,
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-before-${file}\n+after-${file}\n`,
+      }))
+      const url = new URL(route.request().url())
+      const body = url.pathname.startsWith("/api/")
+        ? { location: { directory, project: { id: projectID, directory } }, data: diffs }
+        : diffs
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
+    })
+
+    const summary = page.locator('[data-timeline-row="DiffSummary"]')
+    await expect(summary).toBeVisible()
+    expect(requests).toBe(0)
+
+    const first = summary.getByRole("button", { name: /first\.ts/ })
+    const firstResponse = page.waitForResponse((response) => /\/session\/[^/]+\/diff(?:\?.*)?$/.test(response.url()))
+    await first.click()
+    expect((await firstResponse).ok()).toBe(true)
+    await expect(summary.locator('[data-slot="session-turn-diff-view"]')).toContainText("after-src/first.ts")
+
+    await summary.getByRole("button", { name: /second\.ts/ }).click()
+    await expect(
+      summary.locator('[data-slot="session-turn-diff-view"]', { hasText: "after-src/second.ts" }),
+    ).toBeVisible()
+    await expect(
+      summary.locator('[data-slot="session-turn-diff-view"]', { hasText: "after-src/first.ts" }),
+    ).toBeVisible()
+    expect(requests).toBe(1)
+  })
+
+  test("keeps embedded legacy patches inline without fetching", async ({ page }) => {
+    const user = userMessage(undefined, { summary: { diffs: [summaryDiff(0)] } })
+    await setupTimeline(page, { messages: [user, assistantMessage()] })
+
+    let requests = 0
+    await page.route(/(?:\/api)?\/session\/[^/]+\/diff(?:\?.*)?$/, (route) => {
+      requests += 1
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([]) })
+    })
+
+    const summary = page.locator('[data-timeline-row="DiffSummary"]')
+    await summary.getByRole("button", { name: /diff-0\.ts/ }).click()
+    await expect(summary.locator('[data-slot="session-turn-diff-view"]')).toContainText("export const value = 1")
+    expect(requests).toBe(0)
+  })
+
+  test("renders an embedded legacy patch after another file's lazy diff request fails", async ({ page }) => {
+    const user = userMessage(undefined, {
+      summary: {
+        diffs: [{ file: "src/stats-only.ts", additions: 1, deletions: 1 }, summaryDiff(0)],
+      },
+    })
+    await setupTimeline(page, { messages: [user, assistantMessage()] })
+
+    let requests = 0
+    await page.route(/(?:\/api)?\/session\/[^/]+\/diff(?:\?.*)?$/, (route) => {
+      requests += 1
+      return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "failed" }) })
+    })
+
+    const summary = page.locator('[data-timeline-row="DiffSummary"]')
+    const response = page.waitForResponse((response) => /\/session\/[^/]+\/diff(?:\?.*)?$/.test(response.url()))
+    await summary.getByRole("button", { name: /stats-only\.ts/ }).click()
+    expect((await response).status()).toBe(500)
+    await expect(summary.getByRole("alert")).toContainText(/failed|request failed/i)
+
+    const requestsAfterFailure = requests
+    await summary.getByRole("button", { name: /diff-0\.ts/ }).click()
+    const embeddedView = summary
+      .locator('[data-slot="session-turn-diff-view"]')
+      .filter({ hasText: "export const value = 1" })
+    await expect(embeddedView).toBeVisible()
+    await expect(embeddedView.getByRole("alert")).toHaveCount(0)
+    expect(requests).toBe(requestsAfterFailure)
+  })
+
+  test("loads each timeline turn's patch for its own message", async ({ page }) => {
+    const firstID = "msg_1000_first_turn"
+    const secondID = "msg_2000_second_turn"
+    const firstUser = userMessage(undefined, {
+      id: firstID,
+      summary: { diffs: [{ file: "src/first-turn.ts", additions: 1, deletions: 1 }] },
+    })
+    const secondUser = userMessage(undefined, {
+      id: secondID,
+      created: 1700000004000,
+      summary: { diffs: [{ file: "src/second-turn.ts", additions: 1, deletions: 1 }] },
+    })
+    await setupTimeline(page, {
+      messages: [
+        firstUser,
+        assistantMessage([], { id: "msg_1001_first_turn_assistant", parentID: firstID, created: 1700000001000 }),
+        secondUser,
+        assistantMessage([], { id: "msg_2001_second_turn_assistant", parentID: secondID, created: 1700000005000 }),
+      ],
+    })
+
+    let requests = 0
+    await page.route(/(?:\/api)?\/session\/[^/]+\/diff(?:\?.*)?$/, (route) => {
+      requests += 1
+      const url = new URL(route.request().url())
+      const first = url.searchParams.get("messageID") === firstID
+      const file = first ? "src/first-turn.ts" : "src/second-turn.ts"
+      const name = first ? "first-turn" : "second-turn"
+      const diff = {
+        file,
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch: `diff --git a/${file} b/${file}\n--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n-before-${name}\n+after-${name}\n`,
+      }
+      const body = url.pathname.startsWith("/api/")
+        ? { location: { directory, project: { id: projectID, directory } }, data: [diff] }
+        : [diff]
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
+    })
+
+    const firstSummary = page.locator(`[data-timeline-row="DiffSummary"][data-message-id="${firstID}"]`)
+    const secondSummary = page.locator(`[data-timeline-row="DiffSummary"][data-message-id="${secondID}"]`)
+    await firstSummary.getByRole("button", { name: /first-turn\.ts/ }).click()
+    await expect(firstSummary.locator('[data-slot="session-turn-diff-view"]')).toContainText("after-first-turn")
+    await secondSummary.getByRole("button", { name: /second-turn\.ts/ }).click()
+    await expect(secondSummary.locator('[data-slot="session-turn-diff-view"]')).toContainText("after-second-turn")
+    await expect(secondSummary.locator('[data-slot="session-turn-diff-view"]')).not.toContainText("after-first-turn")
+    expect(requests).toBe(2)
+  })
+
+  test("shows and retries a failed expanded timeline diff", async ({ page }) => {
+    const user = userMessage(undefined, {
+      summary: { diffs: [{ file: "src/retry-timeline.ts", additions: 1, deletions: 1 }] },
+    })
+    await setupTimeline(page, { messages: [user, assistantMessage()] })
+
+    let requests = 0
+    let retry = false
+    await page.route(/(?:\/api)?\/session\/[^/]+\/diff(?:\?.*)?$/, (route) => {
+      requests += 1
+      if (!retry)
+        return route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "failed" }),
+        })
+      const diff = {
+        file: "src/retry-timeline.ts",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+        patch:
+          "diff --git a/src/retry-timeline.ts b/src/retry-timeline.ts\n--- a/src/retry-timeline.ts\n+++ b/src/retry-timeline.ts\n@@ -1 +1 @@\n-before\n+after-retry\n",
+      }
+      const url = new URL(route.request().url())
+      const body = url.pathname.startsWith("/api/")
+        ? { location: { directory, project: { id: projectID, directory } }, data: [diff] }
+        : [diff]
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) })
+    })
+
+    const summary = page.locator('[data-timeline-row="DiffSummary"]')
+    await summary.getByRole("button", { name: /retry-timeline\.ts/ }).click()
+    await expect(summary.getByText("Request failed", { exact: true })).toBeVisible()
+    const previousRequests = requests
+    retry = true
+    const retried = page.waitForResponse((response) => /\/session\/[^/]+\/diff(?:\?.*)?$/.test(response.url()))
+    await summary.getByRole("button", { name: "Refresh" }).click()
+    expect((await retried).ok()).toBe(true)
+    await expect(summary.locator('[data-slot="session-turn-diff-view"]')).toContainText("after-retry")
+    expect(requests).toBe(previousRequests + 1)
+  })
+
+  test("shows a localized retry state when loading last-turn review diffs fails", async ({ page }) => {
+    const user = userMessage(undefined, {
+      summary: { diffs: [{ file: "src/retry.ts", additions: 1, deletions: 1 }] },
+    })
+    await setupTimeline(page, { messages: [user, assistantMessage()], settings: { newLayoutDesigns: true } })
+
+    let requests = 0
+    await page.route(/(?:\/api)?\/session\/[^/]+\/diff(?:\?.*)?$/, (route) => {
+      requests += 1
+      return route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "failed" }) })
+    })
+
+    await page.getByRole("button", { name: "Toggle review" }).click()
+    await page.getByRole("button", { name: "Git changes" }).click()
+    await page.getByRole("option", { name: "Last turn changes" }).click()
+
+    await expect(page.getByText("Request failed", { exact: true })).toBeVisible()
+    const retry = page.getByRole("button", { name: "Refresh" })
+    await expect(retry).toBeVisible()
+    const previousRequests = requests
+    const retried = page.waitForResponse((response) => /\/session\/[^/]+\/diff(?:\?.*)?$/.test(response.url()))
+    await retry.click()
+    expect((await retried).status()).toBe(500)
+    expect(requests).toBe(previousRequests + 1)
   })
 
   test("renders interruption independently when the turn is not compacted", async ({ page }) => {

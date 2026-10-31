@@ -4,17 +4,19 @@ import {
   createSignal,
   For,
   Index,
+  Match,
   on,
   onCleanup,
   onMount,
   Show,
+  Switch,
   type Accessor,
   type JSX,
 } from "solid-js"
 import { createStore, produce } from "solid-js/store"
 import { Dynamic } from "solid-js/web"
 import { useNavigate } from "@solidjs/router"
-import { useMutation } from "@tanstack/solid-query"
+import { createQuery, useMutation } from "@tanstack/solid-query"
 import { createVirtualizer, defaultRangeExtractor, elementScroll, type VirtualItem } from "@tanstack/solid-virtual"
 import { Accordion } from "@opencode-ai/ui/accordion"
 import { Button } from "@opencode-ai/ui/button"
@@ -70,6 +72,8 @@ import { useSettings } from "@/context/settings"
 import { legacySessionHref, requireServerKey, sessionHref } from "@/utils/session-route"
 import { useSDK } from "@/context/sdk"
 import { useSync } from "@/context/sync"
+import { sessionTurnDiffQueryOptions } from "../turn-diff-query"
+import { sessionTurnDiffViewState } from "../turn-diff-view-state"
 import { notifySessionTabsRemoved } from "@/components/titlebar-session-events"
 import { sessionTitle } from "@/utils/session-title"
 import { scheduleConnectedMeasure } from "./measure"
@@ -142,8 +146,9 @@ function TimelineThinkingRow(props: { reasoningHeading?: string; showReasoningSu
   )
 }
 
-function TimelineDiffSummaryRow(props: { diffs: SummaryDiff[] }) {
+function TimelineDiffSummaryRow(props: { sessionID: string | undefined; userMessageID: string; diffs: SummaryDiff[] }) {
   const language = useLanguage()
+  const sdk = useSDK()
   const maxFiles = 10
   const [state, setState] = createStore({
     showAll: false,
@@ -153,6 +158,28 @@ function TimelineDiffSummaryRow(props: { diffs: SummaryDiff[] }) {
   const expanded = () => state.expanded
   const overflow = createMemo(() => Math.max(0, props.diffs.length - maxFiles))
   const visible = createMemo(() => (showAll() ? props.diffs : props.diffs.slice(0, maxFiles)))
+  const query = createQuery(() => {
+    const client = sdk().client
+    const sessionID = props.sessionID
+    const messageID = props.userMessageID
+
+    return sessionTurnDiffQueryOptions({
+      directory: sdk().directory,
+      sessionID,
+      messageID,
+      enabled: props.diffs.some((diff) => expanded().includes(diff.file) && !hasEmbeddedDiff(diff)),
+      queryFn: (sessionID, messageID) =>
+        client.session.diff({ sessionID, messageID }).then((result) => {
+          if (!result.data) throw result.error ?? new Error("Session diff response did not contain data")
+          return { sessionID, messageID, diffs: result.data }
+        }),
+    })
+  })
+  const loadedDiff = (diff: SummaryDiff) => {
+    const data = query.data
+    if (!data || data.sessionID !== props.sessionID || data.messageID !== props.userMessageID) return
+    return data.diffs.find((item): item is SummaryDiff => item.file === diff.file)
+  }
 
   return (
     <div
@@ -206,7 +233,14 @@ function TimelineDiffSummaryRow(props: { diffs: SummaryDiff[] }) {
                   </StickyAccordionHeader>
                   <Accordion.Content>
                     <Show when={opened()}>
-                      <TimelineDiffView diff={diff} />
+                      <TimelineDiffView
+                        diff={diff}
+                        loadedDiff={() => loadedDiff(diff)}
+                        loading={() => query.isPending}
+                        fetching={() => query.isFetching}
+                        error={() => query.isError}
+                        retry={() => void query.refetch()}
+                      />
                     </Show>
                   </Accordion.Content>
                 </Accordion.Item>
@@ -224,14 +258,46 @@ function TimelineDiffSummaryRow(props: { diffs: SummaryDiff[] }) {
   )
 }
 
-function TimelineDiffView(props: { diff: SummaryDiff }) {
+function TimelineDiffView(props: {
+  diff: SummaryDiff
+  loadedDiff: () => SummaryDiff | undefined
+  loading: () => boolean
+  fetching: () => boolean
+  error: () => boolean
+  retry: () => void
+}) {
   const fileComponent = useFileComponent()
-  const view = normalize(props.diff)
+  const language = useLanguage()
+  const embedded = () => hasEmbeddedDiff(props.diff)
+  const state = () => sessionTurnDiffViewState({ embedded: embedded(), loading: props.loading(), error: props.error() })
+  const view = () => normalize(hasEmbeddedDiff(props.diff) ? props.diff : (props.loadedDiff() ?? props.diff))
 
   return (
     <div data-slot="session-turn-diff-view" data-scrollable>
-      <Dynamic component={fileComponent} mode="diff" virtualize={false} fileDiff={view.fileDiff} />
+      <Switch
+        fallback={<Dynamic component={fileComponent} mode="diff" virtualize={false} fileDiff={view().fileDiff} />}
+      >
+        <Match when={state() === "error"}>
+          <div class="flex items-center gap-2 px-3 py-2 text-12-regular text-text-weak" role="alert">
+            <span>{language.t("common.requestFailed")}</span>
+            <Button size="small" variant="ghost" disabled={props.fetching()} onClick={props.retry}>
+              {language.t("wsl.onboarding.refresh")}
+            </Button>
+          </div>
+        </Match>
+        <Match when={state() === "loading"}>
+          <div>{language.t("common.loading")}</div>
+        </Match>
+      </Switch>
     </div>
+  )
+}
+
+function hasEmbeddedDiff(diff: SummaryDiff) {
+  return (
+    typeof diff.patch === "string" ||
+    ("before" in diff && typeof diff.before === "string") ||
+    ("after" in diff && typeof diff.after === "string")
   )
 }
 
@@ -1206,7 +1272,11 @@ export function MessageTimeline(props: {
         return (
           <TimelineRowFrame row={diffSummaryRow}>
             <div data-slot="session-turn-message-container" class="w-full px-4 md:px-5">
-              <TimelineDiffSummaryRow diffs={diffSummaryRow().diffs} />
+              <TimelineDiffSummaryRow
+                sessionID={sessionID()}
+                userMessageID={diffSummaryRow().userMessageID}
+                diffs={diffSummaryRow().diffs}
+              />
             </div>
           </TimelineRowFrame>
         )

@@ -14,7 +14,7 @@ import { SessionV2 } from "@opencode-ai/core/session"
 import * as SessionExecutionLocal from "@opencode-ai/core/session/execution/local"
 import { locationServiceMapLayer } from "@opencode-ai/core/location-services"
 
-import { NotFoundError } from "@/storage/storage"
+import { NotFoundError, Storage } from "@/storage/storage"
 import { eq } from "drizzle-orm"
 import { and } from "drizzle-orm"
 import { gte } from "drizzle-orm"
@@ -486,7 +486,7 @@ export type Patch = Omit<Partial<Info>, "time" | "share" | "summary" | "revert" 
 const layer: Layer.Layer<
   Service,
   never,
-  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service
+  BackgroundJob.Service | RuntimeFlags.Service | Database.Service | EventV2Bridge.Service | Storage.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -495,6 +495,7 @@ const layer: Layer.Layer<
     const background = yield* BackgroundJob.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
+    const storage = yield* Storage.Service
 
     const createNext = Effect.fn("Session.createNext")(function* (input: {
       id?: SessionID
@@ -619,6 +620,9 @@ const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
+        for (const key of yield* storage.list(["message_diff", sessionID]).pipe(Effect.orDie)) {
+          yield* storage.remove(key).pipe(Effect.orDie)
+        }
         yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
         yield* events.remove(sessionID)
       } catch (error) {
@@ -708,8 +712,35 @@ const layer: Layer.Layer<
         idMap.set(msg.info.id, newID)
 
         const parentID = msg.info.role === "assistant" && msg.info.parentID ? idMap.get(msg.info.parentID) : undefined
+        const inlineDiffs = msg.info.role === "user" ? (msg.info.summary?.diffs ?? []) : []
+        const diffs =
+          inlineDiffs.length === 0
+            ? []
+            : yield* storage.read<Snapshot.FileDiff[]>(["message_diff", input.sessionID, msg.info.id]).pipe(
+                Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(inlineDiffs)),
+                Effect.orDie,
+              )
+        const hasFullDiffs = diffs.some((item) => typeof item.patch === "string")
+        if (hasFullDiffs) {
+          yield* storage.write(["message_diff", session.id, newID], diffs).pipe(Effect.orDie)
+        }
+        const info =
+          msg.info.role === "user" && hasFullDiffs
+            ? {
+                ...msg.info,
+                summary: {
+                  ...msg.info.summary,
+                  diffs: diffs.map(({ file, additions, deletions, status }) => ({
+                    file,
+                    additions,
+                    deletions,
+                    status,
+                  })),
+                },
+              }
+            : msg.info
         const cloned = yield* updateMessage({
-          ...msg.info,
+          ...info,
           sessionID: session.id,
           id: newID,
           ...(parentID && { parentID }),
@@ -854,6 +885,7 @@ const layer: Layer.Layer<
       sessionID: SessionID
       messageID: MessageID
     }) {
+      yield* storage.remove(["message_diff", input.sessionID, input.messageID]).pipe(Effect.orDie)
       yield* events.publish(SessionV1.Event.MessageRemoved, {
         sessionID: input.sessionID,
         messageID: input.messageID,
@@ -1010,7 +1042,7 @@ function listByProject(
 export const node = LayerNode.make({
   service: Service,
   layer: layer,
-  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node],
+  deps: [BackgroundJob.node, RuntimeFlags.node, Database.node, EventV2Bridge.node, Storage.node],
 })
 
 export * as Session from "./session"

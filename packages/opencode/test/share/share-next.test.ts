@@ -5,13 +5,19 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 
 import { AccessToken, AccountID, OrgID, RefreshToken } from "../../src/account/schema"
 import { AccountRepo } from "../../src/account/repo"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { Session } from "@/session/session"
-import type { SessionID } from "../../src/session/schema"
+import { MessageID, type SessionID } from "../../src/session/schema"
 import { ShareNext } from "@/share/share-next"
+import { SessionSummary } from "@/session/summary"
+import { Storage } from "@/storage/storage"
+import { Provider } from "@/provider/provider"
 import { SessionShareTable } from "@opencode-ai/core/share/sql"
 import { Database } from "@opencode-ai/core/database/database"
 import { eq } from "drizzle-orm"
@@ -32,25 +38,53 @@ const json = (req: Parameters<typeof HttpClientResponse.fromWeb>[0], body: unkno
   )
 
 const none = HttpClient.make(() => Effect.die("unexpected http call"))
+const testModel = {
+  id: ModelV2.ID.make("model"),
+  providerID: ProviderV2.ID.make("test"),
+  api: { id: "test", url: "https://example.com", npm: "test" },
+  name: "Test model",
+  capabilities: {
+    temperature: false,
+    reasoning: false,
+    attachment: false,
+    toolcall: false,
+    input: { text: true, audio: false, image: false, video: false, pdf: false },
+    output: { text: true, audio: false, image: false, video: false, pdf: false },
+    interleaved: false,
+  },
+  cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+  limit: { context: 128_000, output: 4_096 },
+  status: "active",
+  options: {},
+  headers: {},
+  release_date: "2025-01-01",
+} satisfies Provider.Model
 
 function requestLayer(client: HttpClient.HttpClient) {
   const replacement = [httpClient, Layer.succeed(HttpClient.HttpClient, client)] as const
   return LayerNode.compile(LayerNode.group([ShareNext.node, AccountRepo.node]), [replacement])
 }
 
-function integrationLayer(client: HttpClient.HttpClient) {
-  const replacement = [httpClient, Layer.succeed(HttpClient.HttpClient, client)] as const
-  return LayerNode.compile(
-    LayerNode.group([
-      ShareNext.node,
-      EventV2Bridge.node,
-      Session.node,
-      SessionProjector.node,
-      AccountRepo.node,
-      Database.node,
-    ]),
-    [replacement],
-  )
+function integrationLayer(client: HttpClient.HttpClient, summaryLayer?: Layer.Layer<SessionSummary.Service>) {
+  const nodes = LayerNode.group([
+    ShareNext.node,
+    EventV2Bridge.node,
+    Session.node,
+    SessionProjector.node,
+    SessionSummary.node,
+    Storage.node,
+    AccountRepo.node,
+    Database.node,
+  ])
+  const httpReplacement = [httpClient, Layer.succeed(HttpClient.HttpClient, client)] as const
+  const providerReplacement = [
+    Provider.node,
+    Layer.mock(Provider.Service, { getModel: () => Effect.succeed(testModel) }),
+  ] as const
+  if (summaryLayer) {
+    return LayerNode.compile(nodes, [httpReplacement, providerReplacement, [SessionSummary.node, summaryLayer]])
+  }
+  return LayerNode.compile(nodes, [httpReplacement, providerReplacement])
 }
 
 const share = (id: SessionID) =>
@@ -170,6 +204,141 @@ describe("ShareNext", () => {
           expect(createRequests[0].method).toBe("POST")
           expect(createRequests[0].url).toBe("https://legacy-share.example.com/api/share")
         }).pipe(Effect.provide(integrationLayer(client)))
+      },
+      { config: { enterprise: { url: "https://legacy-share.example.com" } } },
+    ),
+  )
+
+  it.live("syncs full and incremental message patches from their sidecars", () =>
+    provideTmpdirInstance(
+      () => {
+        const seen: string[] = []
+        const client = HttpClient.make((req) => {
+          if (req.method === "POST" && req.url.endsWith("/api/share")) {
+            return Effect.succeed(
+              json(req, {
+                id: "shr_abc",
+                url: "https://legacy-share.example.com/share/abc",
+                secret: "sec_123",
+              }),
+            )
+          }
+          if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
+            seen.push(new TextDecoder().decode(req.body.body))
+          }
+          return Effect.succeed(json(req, { ok: true }))
+        })
+        return Effect.gen(function* () {
+          const storage = yield* Storage.Service
+          const share = yield* ShareNext.Service
+          const session = yield* Session.Service
+          const info = yield* session.create({ title: "message-patch" })
+          const messageID = MessageID.ascending()
+          const fullDiffs = [
+            { file: "shared.ts", patch: "@@ shared patch", additions: 1, deletions: 0, status: "modified" as const },
+          ]
+          yield* storage.write(["message_diff", info.id, messageID], fullDiffs)
+          const message = yield* session.updateMessage({
+            id: messageID,
+            sessionID: info.id,
+            role: "user",
+            time: { created: Date.now() },
+            agent: "build",
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("model") },
+            summary: { diffs: [{ file: "shared.ts", additions: 1, deletions: 0, status: "modified" }] },
+          } satisfies SessionV1.User)
+          yield* share.create(info.id)
+          yield* pollWithTimeout(
+            Effect.sync(() => (seen.length ? true : undefined)),
+            "timed out waiting for message share sync",
+            "5 seconds",
+          )
+
+          const sync = JSON.parse(seen[0]!) as { data: Array<{ type: string; data: unknown }> }
+          const full = sync.data.find((item) => item.type === "message")
+          expect(full?.data).toMatchObject({ id: messageID, summary: { diffs: fullDiffs } })
+
+          const updatedDiffs = [{ ...fullDiffs[0]!, patch: "@@ updated shared patch" }]
+          yield* storage.write(["message_diff", info.id, messageID], updatedDiffs)
+          yield* session.updateMessage({ ...message, summary: { diffs: message.summary?.diffs ?? [] } })
+          yield* pollWithTimeout(
+            Effect.sync(() => (seen.length > 1 ? true : undefined)),
+            "timed out waiting for incremental message share sync",
+            "5 seconds",
+          )
+
+          const incremental = JSON.parse(seen[1]!) as { data: Array<{ type: string; data: unknown }> }
+          expect(incremental.data.find((item) => item.type === "message")?.data).toMatchObject({
+            id: messageID,
+            summary: { diffs: updatedDiffs },
+          })
+        }).pipe(Effect.provide(integrationLayer(client)))
+      },
+      { config: { enterprise: { url: "https://legacy-share.example.com" } } },
+    ),
+  )
+
+  it.live("does not hydrate message diffs for unshared or diff-free user messages", () =>
+    provideTmpdirInstance(
+      () => {
+        const diffCalls: Array<MessageID | undefined> = []
+        const seen: string[] = []
+        const client = HttpClient.make((req) => {
+          if (req.method === "POST" && req.url.endsWith("/api/share")) {
+            return Effect.succeed(
+              json(req, {
+                id: "shr_abc",
+                url: "https://legacy-share.example.com/share/abc",
+                secret: "sec_123",
+              }),
+            )
+          }
+          if (req.url.endsWith("/sync") && req.body._tag === "Uint8Array") {
+            seen.push(new TextDecoder().decode(req.body.body))
+          }
+          return Effect.succeed(json(req, { ok: true }))
+        })
+        const summaryLayer = Layer.mock(SessionSummary.Service, {
+          diff: ({ messageID }) =>
+            Effect.sync(() => {
+              diffCalls.push(messageID)
+              return []
+            }),
+        })
+        return Effect.gen(function* () {
+          const share = yield* ShareNext.Service
+          const session = yield* Session.Service
+          const unshared = yield* session.create({ title: "unshared" })
+          yield* share.init()
+          yield* session.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: unshared.id,
+            role: "user",
+            time: { created: Date.now() },
+            agent: "build",
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("model") },
+            summary: { diffs: [{ file: "unshared.ts", additions: 1, deletions: 0, status: "modified" }] },
+          } satisfies SessionV1.User)
+          expect(diffCalls).toEqual([])
+
+          const shared = yield* session.create({ title: "diff-free" })
+          yield* session.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: shared.id,
+            role: "user",
+            time: { created: Date.now() },
+            agent: "build",
+            model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("model") },
+            summary: { diffs: [] },
+          } satisfies SessionV1.User)
+          yield* share.create(shared.id)
+          yield* pollWithTimeout(
+            Effect.sync(() => (seen.length ? true : undefined)),
+            "timed out waiting for full share sync",
+            "5 seconds",
+          )
+          expect(diffCalls).toEqual([])
+        }).pipe(Effect.provide(integrationLayer(client, summaryLayer)))
       },
       { config: { enterprise: { url: "https://legacy-share.example.com" } } },
     ),

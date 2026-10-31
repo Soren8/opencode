@@ -473,6 +473,8 @@ opencode export [sessionID]
 
 If you don't provide a session ID, you'll be prompted to select from available sessions.
 
+Turn-diff patches are stored separately under `storage/message_diff` in the data directory. Exports include their full text; database or event-log-only backups retain stats but not patch text, so include this storage in direct backups or use `opencode export` and `opencode import` for a supported round trip.
+
 #### Flags
 
 | Flag                                     | Description                           |
@@ -490,6 +492,8 @@ opencode import <file>
 ```
 
 You can import from a local file or an OpenCode share URL.
+
+Import restores archived turn-diff patches to storage without embedding them in message data.
 
 ```bash
 opencode import session.json

@@ -103,6 +103,11 @@ import { legacySessionHref, requireServerKey, sessionHref } from "@/utils/sessio
 import { useUsageExceededDialogs } from "./session/usage-exceeded-dialogs"
 import { createSessionOwnership } from "./session/session-ownership"
 import { createSessionLineage } from "./session/session-lineage"
+import {
+  bindSessionTurnDiffUpdates,
+  sessionTurnDiffQueryOptions,
+  sessionTurnDiffQueryKey,
+} from "./session/turn-diff-query"
 
 type FollowupItem = FollowupDraft & { id: string }
 type FollowupEdit = Pick<FollowupItem, "id" | "prompt" | "context">
@@ -649,7 +654,7 @@ export default function Page() {
     return open
   }, desktopReviewOpen())
 
-  const turnDiffs = createMemo(() => list(lastUserMessage()?.summary?.diffs))
+  const turnSummary = createMemo(() => list(lastUserMessage()?.summary?.diffs))
   const nogit = createMemo(() => {
     const project = sync().project
     return !!project && project.vcs !== "git"
@@ -700,11 +705,34 @@ export default function Page() {
     }
   })
   const refreshVcs = debounce(() => void queryClient.invalidateQueries({ queryKey: vcsKey() }), 100)
+  // Message summaries only carry per-file stats; patches are fetched on demand.
+  const turnQuery = createQuery(() => {
+    const message = lastUserMessage()
+    const client = sdk().client
+    return sessionTurnDiffQueryOptions({
+      directory: sdk().directory,
+      sessionID: message?.sessionID,
+      messageID: message?.id ?? "",
+      enabled: wantsReview() && reviewMode() === "turn" && turnSummary().length > 0,
+      queryFn: (sessionID, messageID) =>
+        client.session.diff({ sessionID, messageID }).then((result) => {
+          if (!result.data) throw result.error ?? new Error("Session diff response did not contain data")
+          return { sessionID, messageID, diffs: result.data }
+        }),
+    })
+  })
+  const turnDiffs = createMemo(() => {
+    const message = lastUserMessage()
+    if (!message || turnQuery.isFetching || !turnQuery.isSuccess) return
+    const data = turnQuery.data
+    if (!data || data.sessionID !== message.sessionID || data.messageID !== message.id) return
+    return data.diffs
+  })
   const reviewDiffs = () => {
     if (reviewMode() === "git" || reviewMode() === "branch")
       // avoids suspense
       return vcsQuery.isFetched ? (vcsQuery.data ?? []) : []
-    return turnDiffs()
+    return turnDiffs() ?? []
   }
   const activeReviewFile = () => {
     const diffs = reviewDiffs()
@@ -716,7 +744,8 @@ export default function Page() {
   const hasReview = () => reviewCount() > 0
   const reviewReady = () => {
     if (reviewMode() === "git" || reviewMode() === "branch") return !vcsQuery.isPending
-    return true
+    if (turnSummary().length === 0) return true
+    return turnDiffs() !== undefined
   }
   const loadReviewDiff = async (file: string, version?: number): Promise<VcsFileDiff | undefined> => {
     const mode = vcsMode()
@@ -961,6 +990,8 @@ export default function Page() {
     refreshVcs()
   })
   onCleanup(stopVcs)
+
+  bindSessionTurnDiffUpdates(sdk, queryClient)
 
   createEffect(
     on(
@@ -1231,6 +1262,15 @@ export default function Page() {
     return language.t("session.review.noChanges")
   })
 
+  const reviewLoadError = () => (
+    <div class="flex flex-col items-center gap-2 px-6 py-4 text-text-weak" role="alert">
+      <div>{language.t("common.requestFailed")}</div>
+      <Button size="small" variant="ghost" disabled={turnQuery.isFetching} onClick={() => void turnQuery.refetch()}>
+        {language.t("wsl.onboarding.refresh")}
+      </Button>
+    </div>
+  )
+
   const reviewEmpty = (input: { loadingClass: string; emptyClass: string }) => {
     if (reviewMode() === "git" || reviewMode() === "branch") {
       if (!reviewReady()) return <div class={input.loadingClass}>{language.t("session.review.loadingChanges")}</div>
@@ -1239,6 +1279,8 @@ export default function Page() {
 
     if (reviewMode() === "turn") {
       if (nogit()) return createGit(input)
+      if (turnSummary().length > 0 && turnQuery.isError) return reviewLoadError()
+      if (!reviewReady()) return <div class={input.loadingClass}>{language.t("session.review.loadingChanges")}</div>
       return empty(reviewEmptyText())
     }
 
@@ -1250,11 +1292,12 @@ export default function Page() {
   }
 
   const reviewEmptyV2 = () => {
-    if ((reviewMode() === "git" || reviewMode() === "branch") && !reviewReady()) {
-      return <div class="px-6 py-4 text-text-weak">{language.t("session.review.loadingChanges")}</div>
-    }
     if (reviewMode() === "turn" && nogit()) {
       return <SessionReviewEmptyNoGitV2 pending={gitMutation.isPending} onInitGit={initGit} />
+    }
+    if (reviewMode() === "turn" && turnSummary().length > 0 && turnQuery.isError) return reviewLoadError()
+    if (!reviewReady()) {
+      return <div class="px-6 py-4 text-text-weak">{language.t("session.review.loadingChanges")}</div>
     }
     return <SessionReviewEmptyChangesV2 />
   }

@@ -7,6 +7,8 @@ import { Database } from "@opencode-ai/core/database/database"
 import { SessionTable, MessageTable, PartTable } from "@opencode-ai/core/session/sql"
 import { InstanceRef } from "@/effect/instance-ref"
 import { ShareNext } from "@/share/share-next"
+import { SessionSummary } from "@/session/summary"
+import { Storage } from "@/storage/storage"
 import { EOL } from "os"
 import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -89,7 +91,89 @@ export function transformShareData(shareData: ShareData[]): {
   }
 }
 
-type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+export type ExportData = { info: SDKSession; messages: Array<{ info: Message; parts: Part[] }> }
+
+export const importSessionData = Effect.fn("Cli.import.sessionData")(function* (
+  exportData: ExportData,
+  ctx: InstanceContext,
+) {
+  const storage = yield* Storage.Service
+  const { db } = yield* Database.Service
+  const decoded = Schema.decodeUnknownSync(Session.Info)({
+    ...exportData.info,
+    projectID: ctx.project.id,
+    directory: ctx.directory,
+    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
+  }) as Session.Info
+  const row = Session.toRow(decoded)
+  yield* db
+    .insert(SessionTable)
+    .values(row)
+    .onConflictDoUpdate({
+      target: SessionTable.id,
+      set: { project_id: row.project_id, directory: row.directory, path: row.path },
+    })
+    .run()
+    .pipe(Effect.orDie)
+
+  for (const msg of exportData.messages) {
+    const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
+    const { id, sessionID: _, ...msgData } = msgInfo
+    const messageDiffs = msgInfo.role === "user" ? msgInfo.summary?.diffs : undefined
+    const hasMessagePatches = messageDiffs?.some((item) => typeof item.patch === "string") ?? false
+    const info =
+      msgInfo.role === "user" && msgInfo.summary
+        ? {
+            ...msgData,
+            summary: {
+              ...msgInfo.summary,
+              diffs: msgInfo.summary.diffs.map(({ file, additions, deletions, status }) => ({
+                file,
+                additions,
+                deletions,
+                status,
+              })),
+            },
+          }
+        : msgData
+    yield* db
+      .transaction((tx) =>
+        Effect.gen(function* () {
+          const inserted = yield* tx
+            .insert(MessageTable)
+            .values({
+              id,
+              session_id: row.id,
+              time_created: msgInfo.time?.created ?? Date.now(),
+              data: info as never,
+            })
+            .onConflictDoNothing()
+            .returning({ id: MessageTable.id })
+            .get()
+            .pipe(Effect.orDie)
+          if (!inserted || !messageDiffs || !hasMessagePatches) return
+          yield* SessionSummary.writeDiff({ storage, sessionID: row.id, messageID: id, diffs: messageDiffs })
+        }),
+      )
+      .pipe(Effect.orDie)
+
+    for (const part of msg.parts) {
+      const partInfo = decodePart(part) as SessionV1.Part
+      const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
+      yield* db
+        .insert(PartTable)
+        .values({
+          id: partId,
+          message_id: messageID,
+          session_id: row.id,
+          data: partData,
+        })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie)
+    }
+  }
+})
 
 export const ImportCommand = effectCmd({
   command: "import <file>",
@@ -110,7 +194,6 @@ export const ImportCommand = effectCmd({
 const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: InstanceContext) {
   const share = yield* ShareNext.Service
   const fs = yield* FSUtil.Service
-  const { db } = yield* Database.Service
 
   let exportData: ExportData | undefined
 
@@ -176,54 +259,7 @@ const runImport = Effect.fn("Cli.import.body")(function* (file: string, ctx: Ins
     return
   }
 
-  const info = Schema.decodeUnknownSync(Session.Info)({
-    ...exportData.info,
-    projectID: ctx.project.id,
-    directory: ctx.directory,
-    path: path.relative(path.resolve(ctx.worktree), ctx.directory).replaceAll("\\", "/"),
-  }) as Session.Info
-  const row = Session.toRow(info)
-  yield* db
-    .insert(SessionTable)
-    .values(row)
-    .onConflictDoUpdate({
-      target: SessionTable.id,
-      set: { project_id: row.project_id, directory: row.directory, path: row.path },
-    })
-    .run()
-    .pipe(Effect.orDie)
-
-  for (const msg of exportData.messages) {
-    const msgInfo = decodeMessageInfo(msg.info) as SessionV1.Info
-    const { id, sessionID: _, ...msgData } = msgInfo
-    yield* db
-      .insert(MessageTable)
-      .values({
-        id,
-        session_id: row.id,
-        time_created: msgInfo.time?.created ?? Date.now(),
-        data: msgData as never,
-      })
-      .onConflictDoNothing()
-      .run()
-      .pipe(Effect.orDie)
-
-    for (const part of msg.parts) {
-      const partInfo = decodePart(part) as SessionV1.Part
-      const { id: partId, sessionID: _s, messageID, ...partData } = partInfo
-      yield* db
-        .insert(PartTable)
-        .values({
-          id: partId,
-          message_id: messageID,
-          session_id: row.id,
-          data: partData,
-        })
-        .onConflictDoNothing()
-        .run()
-        .pipe(Effect.orDie)
-    }
-  }
+  yield* importSessionData(exportData, ctx)
 
   process.stdout.write(`Imported session: ${exportData.info.id}`)
   process.stdout.write(EOL)

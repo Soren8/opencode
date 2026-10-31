@@ -2,11 +2,13 @@ import { Session } from "@/session/session"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { MessageV2 } from "../../session/message-v2"
 import { SessionID } from "../../session/schema"
+import { SessionSummary } from "@/session/summary"
+import { NotFoundError } from "@/storage/storage"
 import { effectCmd, fail } from "../effect-cmd"
 import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
 import { EOL } from "os"
-import { Effect } from "effect"
+import { Cause, Effect } from "effect"
 
 function redact(kind: string, id: string, value: string) {
   return value.trim() ? `[redacted:${kind}:${id}]` : value
@@ -219,6 +221,36 @@ function sanitize(data: { info: Session.Info; messages: SessionV1.WithParts[] })
   }
 }
 
+export const exportSessionData = Effect.fn("Cli.export.sessionData")(function* (sessionID: SessionID) {
+  const sessions = yield* Session.Service
+  const summary = yield* SessionSummary.Service
+  const info = yield* sessions.get(sessionID).pipe(
+    Effect.orDie,
+    Effect.catchCauseIf(
+      (cause) => NotFoundError.isInstance(Cause.squash(cause)),
+      () => fail(`Session not found: ${sessionID}`),
+    ),
+  )
+  const messages = yield* sessions.messages({ sessionID }).pipe(
+    Effect.catchIf(NotFoundError.isInstance, () => fail(`Session not found: ${sessionID}`)),
+  )
+  const complete = yield* Effect.forEach(messages, (message) =>
+    Effect.gen(function* () {
+      if (message.info.role !== "user") return message
+      const diffs = yield* summary.diff({ sessionID, messageID: message.info.id })
+      if (!diffs.length && !message.info.summary) return message
+      return {
+        ...message,
+        info: {
+          ...message.info,
+          summary: { ...message.info.summary, diffs },
+        },
+      }
+    }),
+  )
+  return { info, messages: complete }
+})
+
 export const ExportCommand = effectCmd({
   command: "export [sessionID]",
   describe: "export session data as JSON",
@@ -278,15 +310,8 @@ const run = Effect.fn("Cli.export.body")(function* (args: { sessionID?: string; 
     prompts.outro("Exporting session...", { output: process.stderr })
   }
 
-  // Match legacy try/catch — catches both typed failures and defects
-  // (Session.Service.get throws NotFoundError as a defect, not a typed E).
-  return yield* Effect.gen(function* () {
-    const sessionInfo = yield* svc.get(sessionID!)
-    const messages = yield* svc.messages({ sessionID: sessionInfo.id })
+  const exportData = yield* exportSessionData(sessionID!)
 
-    const exportData = { info: sessionInfo, messages }
-
-    process.stdout.write(JSON.stringify(args.sanitize ? sanitize(exportData) : exportData, null, 2))
-    process.stdout.write(EOL)
-  }).pipe(Effect.catchCause(() => fail(`Session not found: ${sessionID!}`)))
+  process.stdout.write(JSON.stringify(args.sanitize ? sanitize(exportData) : exportData, null, 2))
+  process.stdout.write(EOL)
 })
