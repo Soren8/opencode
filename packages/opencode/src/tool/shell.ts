@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Effect, Exit, Semaphore, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -25,6 +25,8 @@ import { BashArity } from "@/permission/arity"
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
+// Each metadata update re-publishes the whole running part, so chatty commands are coalesced.
+const METADATA_INTERVAL_MS = 200
 const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -438,7 +440,13 @@ export const ShellTool = Tool.define(
       const limits = yield* trunc.limits()
       const keep = limits.maxBytes * 2
       let full = ""
+      let fullBytes = 0
       let last = ""
+      let dirty = false
+      let emitted = 0
+      let revision = 0
+      let scheduled = false
+      const metadataLock = Semaphore.makeUnsafe(1)
       const list: Chunk[] = []
       let used = 0
       let file = ""
@@ -472,16 +480,66 @@ export const ShellTool = Tool.define(
         ).pipe(Effect.catch(() => Effect.void))
       })
 
+      const flush = metadataLock.withPermits(1)(
+        Effect.suspend(() => {
+          if (!dirty) return Effect.void
+          const current = revision
+          return ctx.metadata({ metadata: { output: last } }).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                dirty = revision !== current
+                emitted = Date.now()
+              }),
+            ),
+          )
+        }),
+      )
+
+      const schedule = Effect.suspend(() => {
+        if (scheduled) return Effect.void
+        scheduled = true
+        return Effect.gen(function* () {
+          while (true) {
+            while (dirty) {
+              const delay = METADATA_INTERVAL_MS - (Date.now() - emitted)
+              if (delay > 0) yield* Effect.sleep(`${delay} millis`)
+              yield* flush
+            }
+            if (
+              !(yield* Effect.sync(() => {
+                if (dirty) return true
+                scheduled = false
+                return false
+              }))
+            ) {
+              return
+            }
+          }
+        }).pipe(
+          Effect.ensuring(Effect.sync(() => {
+            scheduled = false
+          })),
+          Effect.forkScoped,
+          Effect.asVoid,
+        )
+      })
+
       yield* ctx.metadata({
         metadata: {
           output: "",
         },
       })
 
-      const code: number | null = yield* Effect.scoped(
+      const exit = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.addFinalizer(closeSink)
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
+          const progress = Effect.suspend(() => {
+            dirty = true
+            revision++
+            if (Date.now() - emitted < METADATA_INTERVAL_MS) return schedule
+            return flush
+          })
 
           yield* Effect.forkScoped(
             Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
@@ -501,7 +559,8 @@ export const ShellTool = Tool.define(
                 sink?.write(chunk)
               } else {
                 full += chunk
-                if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
+                fullBytes += size
+                if (fullBytes > limits.maxBytes) {
                   return trunc.write(full).pipe(
                     Effect.andThen((next) =>
                       Effect.sync(() => {
@@ -509,24 +568,15 @@ export const ShellTool = Tool.define(
                         cut = true
                         sink = createWriteStream(next, { flags: "a" })
                         full = ""
+                        fullBytes = 0
                       }),
                     ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                        },
-                      }),
-                    ),
+                    Effect.andThen(progress),
                   )
                 }
               }
 
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                },
-              })
+              return progress
             }),
           )
 
@@ -539,7 +589,7 @@ export const ShellTool = Tool.define(
 
           const timeout = Effect.sleep(`${input.timeout + 100} millis`)
 
-          const exit = yield* Effect.raceAll([
+          const exit = yield* Effect.raceAllFirst([
             handle.exitCode.pipe(Effect.map((code) => ({ kind: "exit" as const, code }))),
             abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
@@ -556,7 +606,10 @@ export const ShellTool = Tool.define(
 
           return exit.kind === "exit" ? exit.code : null
         }),
-      ).pipe(Effect.orDie)
+      ).pipe(Effect.orDie, Effect.exit)
+      yield* Effect.uninterruptible(flush)
+      if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause)
+      const code: number | null = exit.value
 
       const meta: string[] = []
       if (expired) {

@@ -1,7 +1,7 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { describe, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import type * as Scope from "effect/Scope"
 import os from "os"
 import path from "path"
@@ -1129,6 +1129,104 @@ describe("tool.shell abort", () => {
       }),
     ),
   )
+
+  it.live("throttles metadata updates for chatty commands", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const updates: string[] = []
+        const code =
+          "let i=0;const t=setInterval(()=>{process.stdout.write(\"line \"+i+String.fromCharCode(10));if(++i===300)clearInterval(t)},2)"
+        const result = yield* run(
+          {
+            command: `${bin} -e ${evalarg(code)}`,
+          },
+          {
+            ...ctx,
+            metadata: (input) =>
+              Effect.sync(() => {
+                const output = (input.metadata as { output?: string })?.output
+                if (output) updates.push(output)
+              }),
+          },
+        )
+        expect(result.output).toContain("line 299")
+        expect(updates.length).toBeGreaterThan(1)
+        expect(updates.length).toBeLessThan(30)
+        expect(updates.at(-1)).toContain("line 299")
+      }),
+    ),
+    15_000,
+  )
+
+  it.live("flushes the latest burst metadata while the command is still running", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const first = yield* Deferred.make<void>()
+        const updates: string[] = []
+        const controller = new AbortController()
+        const fiber = yield* run(
+          {
+            command: `${bin} -e ${evalarg('process.stdout.write("first");setTimeout(()=>process.stdout.write("Password:"),50);setInterval(()=>{},1000)')}`,
+          },
+          {
+            ...ctx,
+            abort: controller.signal,
+            metadata: (input) => {
+              const output = (input.metadata as { output?: string })?.output
+              if (!output) return Effect.void
+              return Effect.sync(() => {
+                updates.push(output)
+                if (updates.length === 1) Deferred.doneUnsafe(first, Effect.void)
+              })
+            },
+          },
+        ).pipe(Effect.forkChild)
+
+        yield* Deferred.await(first).pipe(Effect.timeout("15 seconds"))
+        yield* Effect.sleep("300 millis")
+        const output = updates.at(-1)
+        controller.abort()
+        const exit = yield* Fiber.await(fiber)
+
+        expect(output).toBe("firstPassword:")
+        expect(Exit.isSuccess(exit)).toBe(true)
+      }),
+    ),
+    30_000,
+  )
+
+  if (process.platform !== "win32") {
+    it.live("flushes trailing output metadata when the process is terminated", () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const updates: string[] = []
+          const exit = yield* run(
+            {
+              command: "printf first; sleep 0.05; printf second; sleep 0.03; kill -TERM $$",
+              timeout: 50,
+            },
+            {
+              ...ctx,
+              metadata: (input) =>
+                Effect.sync(() => {
+                  const output = (input.metadata as { output?: string })?.output
+                  if (output) updates.push(output)
+                }),
+            },
+          ).pipe(Effect.exit)
+
+          expect(Exit.isFailure(exit)).toBe(true)
+          expect(Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "").toContain(
+            "Process interrupted due to receipt of signal",
+          )
+          expect(updates.at(-1)).toContain("second")
+        }),
+      ),
+    )
+  }
 })
 
 describe("tool.shell truncation", () => {
@@ -1161,6 +1259,28 @@ describe("tool.shell truncation", () => {
       }),
     ),
   )
+
+  if (process.platform !== "win32") {
+    it.live("counts UTF-8 bytes across streamed output chunks", () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const count = 30_000
+          const code =
+            'let i=0;const text="é".repeat(5000);const timer=setInterval(()=>{process.stdout.write(text);if(++i===6)clearInterval(timer)},5)'
+          const result = yield* run({
+            command: `${bin} -e ${evalarg(code)}`,
+          })
+          mustTruncate(result)
+
+          const filepath = (result.metadata as { outputPath?: string }).outputPath
+          expect(filepath).toBeTruthy()
+          const saved = yield* (yield* FSUtil.Service).readFileString(filepath!)
+          expect(saved).toBe("é".repeat(count))
+        }),
+      ),
+    )
+  }
 
   it.live("does not truncate small output", () =>
     runIn(

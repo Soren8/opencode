@@ -5,12 +5,14 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
 import { Provider } from "@/provider/provider"
 
 import { Session } from "@/session/session"
+import { SessionPrompt } from "@/session/prompt"
 import { LLM } from "../../src/session/llm"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionProcessor } from "../../src/session/processor"
@@ -103,9 +105,9 @@ function defer<T>() {
   return { promise, resolve }
 }
 
-const waitFor = <A>(check: Effect.Effect<A | undefined>, message: string) =>
+const waitFor = <A>(check: Effect.Effect<A | undefined>, message: string, duration = 500) =>
   Effect.gen(function* () {
-    const stop = Date.now() + 500
+    const stop = Date.now() + duration
     while (Date.now() < stop) {
       const value = yield* check
       if (value !== undefined) return value
@@ -185,6 +187,9 @@ const env = LayerNode.compile(
 )
 
 const it = testEffect(env)
+const itPrompt = testEffect(
+  AppNodeBuilder.build(LayerNode.group([SessionPrompt.node, Session.node, MessageV2.node, SessionProjector.node])),
+)
 
 const providerErrorLLM = Layer.succeed(
   LLM.Service,
@@ -284,6 +289,56 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
     { config: (url) => providerCfg(url) },
   ),
 )
+
+if (process.platform !== "win32") {
+  itPrompt.instance(
+    "session prompt shell flushes burst metadata while the command is still running",
+    () =>
+      Effect.gen(function* () {
+        const database = yield* Database.Service
+        const prompt = yield* SessionPrompt.Service
+        const session = yield* Session.Service
+        const chat = yield* session.create({})
+        const shellPart = () =>
+          MessageV2.filterCompactedEffect(chat.id).pipe(
+            Effect.provideService(Database.Service, database),
+            Effect.map((messages) => {
+              const assistant = messages.findLast((message) => message.info.role === "assistant")
+              return assistant?.parts.find((part): part is SessionV1.ToolPart => part.type === "tool")
+            }),
+          )
+
+        const fiber = yield* prompt
+          .shell({
+            sessionID: chat.id,
+            agent: "build",
+            model: ref,
+            command: "printf first; sleep 0.05; printf Password:; sleep 30",
+          })
+          .pipe(Effect.forkChild)
+
+        yield* waitFor(
+          shellPart().pipe(
+            Effect.map((part) =>
+              part?.state.status === "running" && part.state.metadata?.output.includes("first") ? part : undefined,
+            ),
+          ),
+          "timed out waiting for initial running shell metadata",
+          10_000,
+        )
+        yield* Effect.sleep("300 millis")
+        const running = yield* shellPart()
+
+        expect(running?.state.status).toBe("running")
+        if (running?.state.status === "running") {
+          expect(running.state.metadata?.output).toBe("firstPassword:")
+        }
+
+        yield* Fiber.interrupt(fiber)
+      }),
+    30_000,
+  )
+}
 
 it.live("session.processor effect tests preserve text start time", () =>
   provideTmpdirServer(

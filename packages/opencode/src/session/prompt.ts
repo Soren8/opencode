@@ -44,7 +44,7 @@ import { Truncate } from "@/tool/truncate"
 import { Image } from "@/image/image"
 import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
-import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
+import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Semaphore, Types } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
@@ -65,6 +65,7 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 const decodeMessageInfo = Schema.decodeUnknownExit(SessionV1.Info)
 const decodeMessagePart = Schema.decodeUnknownExit(SessionV1.Part)
 const MAX_MCP_RESOURCE_BLOB_BYTES = 10 * 1024 * 1024
+const SHELL_METADATA_INTERVAL_MS = 200
 const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "application/pdf",
   "image/gif",
@@ -527,6 +528,11 @@ const layer = Layer.effect(
           const sh = Shell.preferred(cfg.shell)
           const args = Shell.args(sh, input.command, cwd)
           let output = ""
+          let updated = 0
+          let revision = 0
+          let dirty = false
+          let scheduled = false
+          const metadataLock = Semaphore.makeUnsafe(1)
           let aborted = false
 
           const finish = Effect.uninterruptible(
@@ -553,6 +559,53 @@ const layer = Layer.effect(
             }),
           )
 
+          const flush = metadataLock.withPermits(1)(
+            Effect.suspend(() => {
+              if (part.state.status !== "running" || !dirty) return Effect.void
+              const current = revision
+              part.state.metadata = { output }
+              return sessions.updatePart(part).pipe(
+                Effect.andThen(
+                  Effect.sync(() => {
+                    updated = Date.now()
+                    dirty = revision !== current
+                  }),
+                ),
+              )
+            }),
+          )
+
+          const schedule = Effect.suspend(() => {
+            if (scheduled) return Effect.void
+            scheduled = true
+            return Effect.gen(function* () {
+              while (true) {
+                while (dirty && part.state.status === "running") {
+                  const delay = SHELL_METADATA_INTERVAL_MS - (Date.now() - updated)
+                  if (delay > 0) yield* Effect.sleep(`${delay} millis`)
+                  yield* flush
+                }
+                if (
+                  !(yield* Effect.sync(() => {
+                    if (dirty && part.state.status === "running") return true
+                    scheduled = false
+                    return false
+                  }))
+                ) {
+                  return
+                }
+              }
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  scheduled = false
+                }),
+              ),
+              Effect.forkScoped,
+              Effect.asVoid,
+            )
+          })
+
           const exit = yield* restore(
             Effect.gen(function* () {
               const shellEnv = yield* plugin.trigger(
@@ -571,10 +624,11 @@ const layer = Layer.effect(
               yield* Stream.runForEach(Stream.decodeText(handle.all), (chunk) =>
                 Effect.gen(function* () {
                   output += chunk
-                  if (part.state.status === "running") {
-                    part.state.metadata = { output }
-                    yield* sessions.updatePart(part)
-                  }
+                  if (part.state.status !== "running") return
+                  revision++
+                  dirty = true
+                  if (Date.now() - updated < SHELL_METADATA_INTERVAL_MS) return yield* schedule
+                  yield* flush
                 }),
               )
               yield* handle.exitCode
