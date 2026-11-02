@@ -64,6 +64,7 @@ it.instance("build agent has correct default properties", () =>
     expect(build).toBeDefined()
     expect(build?.mode).toBe("primary")
     expect(build?.native).toBe(true)
+    expect(build?.prompt).toBeUndefined()
     expect(evalPerm(build, "edit")).toBe("allow")
     expect(evalPerm(build, "bash")).toBe("allow")
   }),

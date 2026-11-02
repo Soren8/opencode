@@ -42,7 +42,7 @@ When working on an existing codebase, you should:
 - Make MINIMAL changes to achieve the goal. This is very important to your performance.
 - Follow the coding style of existing code in the project.
 
-DO NOT run `git commit`, `git push`, `git reset`, `git rebase` and/or do any other git mutations unless explicitly asked to do so. Ask for confirmation each time when you need to do git mutations, even if the user has confirmed in earlier conversations.
+DO NOT run `git push`, `git reset`, `git rebase` or other destructive git operations unless explicitly asked to do so. Ask for confirmation each time, even if the user has confirmed in earlier conversations.
 
 # General Guidelines for Research and Data Processing
 
