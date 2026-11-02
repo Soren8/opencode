@@ -13,6 +13,7 @@ import { withTransientReadRetry } from "@/util/effect-http-client"
 import { Global } from "@opencode-ai/core/global"
 import type { MessageV2 } from "./message-v2"
 import type { MessageID } from "./schema"
+import PROMPT_BOOTSTRAP from "./prompt/bootstrap.txt"
 
 function extract(messages: SessionV1.WithParts[]) {
   const paths = new Set<string>()
@@ -107,14 +108,21 @@ const layer: Layer.Layer<
       s.claims.delete(messageID)
     })
 
-    const systemPaths = Effect.fn("Instruction.systemPaths")(function* () {
+    // Keyed by realpath so symlinked aliases of one file load once; values keep the first-seen path.
+    const systemEntries = Effect.fnUntraced(function* () {
       const config = yield* cfg.get()
       const ctx = yield* InstanceState.context
-      const paths = new Set<string>()
+      const entries = new Map<string, string>()
+      const add = (item: string) =>
+        fs.resolve(item).pipe(
+          Effect.map((real) => {
+            if (!entries.has(real)) entries.set(real, item)
+          }),
+        )
 
       for (const file of globalFiles) {
         if (yield* fs.existsSafe(file)) {
-          paths.add(path.resolve(file))
+          yield* add(path.resolve(file))
           break
         }
       }
@@ -126,7 +134,7 @@ const layer: Layer.Layer<
             .findUp(file, ctx.directory, ctx.worktree)
             .pipe(Effect.catch(() => Effect.succeed([])))
           if (matches.length > 0) {
-            matches.forEach((item) => paths.add(path.resolve(item)))
+            for (const item of matches) yield* add(path.resolve(item))
             break
           }
         }
@@ -145,11 +153,15 @@ const layer: Layer.Layer<
                 })
               : relative(instruction)
           ).pipe(Effect.catch(() => Effect.succeed([] as string[])))
-          matches.forEach((item) => paths.add(path.resolve(item)))
+          for (const item of matches) yield* add(path.resolve(item))
         }
       }
 
-      return paths
+      return entries
+    })
+
+    const systemPaths = Effect.fn("Instruction.systemPaths")(function* () {
+      return new Set((yield* systemEntries()).values())
     })
 
     const system = Effect.fn("Instruction.system")(function* () {
@@ -162,10 +174,11 @@ const layer: Layer.Layer<
       const files = yield* Effect.forEach(Array.from(paths), read, { concurrency: 8 })
       const remote = yield* Effect.forEach(urls, fetch, { concurrency: 4 })
 
-      return [
+      const rules = [
         ...Array.from(paths).flatMap((item, i) => (files[i] ? [`Instructions from: ${item}\n${files[i]}`] : [])),
         ...urls.flatMap((item, i) => (remote[i] ? [`Instructions from: ${item}\n${remote[i]}`] : [])),
       ]
+      return rules.length > 0 ? [PROMPT_BOOTSTRAP.trim(), ...rules] : []
     })
 
     const find = Effect.fn("Instruction.find")(function* (dir: string) {
@@ -181,8 +194,8 @@ const layer: Layer.Layer<
       filepath: string,
       messageID: MessageID,
     ) {
-      const sys = yield* systemPaths()
-      const already = extract(messages)
+      const sys = yield* systemEntries()
+      const already = new Set(yield* Effect.forEach(extract(messages), (item) => fs.resolve(item)))
       const results: { filepath: string; content: string }[] = []
       const s = yield* InstanceState.get(state)
       const root = path.resolve(yield* InstanceState.directory)
@@ -193,7 +206,8 @@ const layer: Layer.Layer<
       // Walk upward from the file being read and attach nearby instruction files once per message.
       while (current.startsWith(root) && current !== root) {
         const found = yield* find(current)
-        if (!found || found === target || sys.has(found) || already.has(found)) {
+        const real = found ? yield* fs.resolve(found) : undefined
+        if (!found || !real || found === target || sys.has(real) || already.has(real)) {
           current = path.dirname(current)
           continue
         }
@@ -203,12 +217,12 @@ const layer: Layer.Layer<
           set = new Set()
           s.claims.set(messageID, set)
         }
-        if (set.has(found)) {
+        if (set.has(real)) {
           current = path.dirname(current)
           continue
         }
 
-        set.add(found)
+        set.add(real)
         const content = yield* read(found)
         if (content) {
           results.push({ filepath: found, content: `Instructions from: ${found}\n${content}` })

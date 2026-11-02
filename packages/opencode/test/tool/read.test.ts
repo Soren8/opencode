@@ -582,6 +582,24 @@ describe("tool.read loaded instructions", () => {
       expect(result.metadata.loaded).toContain(path.join(dir, "subdir", "AGENTS.md"))
     }),
   )
+
+  it.live("includes nearby instructions in a system-reminder when reading an image", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      yield* put(path.join(dir, "subdir", "AGENTS.md"), "# Image Subdir Instructions\nBe extra helpful.")
+      const png = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
+        "base64",
+      )
+      yield* put(path.join(dir, "subdir", "nested", "image.png"), png)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "subdir", "nested", "image.png") })
+      expect(result.output).toContain("Image read successfully")
+      expect(result.output).toContain("system-reminder")
+      expect(result.output).toContain("Image Subdir Instructions")
+      expect(result.metadata.loaded).toContain(path.join(dir, "subdir", "AGENTS.md"))
+    }),
+  )
 })
 
 describe("tool.read binary detection", () => {

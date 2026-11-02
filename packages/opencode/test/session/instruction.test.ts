@@ -206,6 +206,24 @@ describe("Instruction.resolve", () => {
     ),
   )
 
+  it.live("skips nested instruction files that alias a system instruction", () =>
+    withFiles({ "AGENTS.md": "# Root Instructions" }, (dir) =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem
+        yield* fs.makeDirectory(path.join(dir, "subdir", "nested"), { recursive: true })
+        yield* fs.symlink(path.join(dir, "AGENTS.md"), path.join(dir, "subdir", "AGENTS.md"))
+
+        const svc = yield* Instruction.Service
+        const results = yield* svc.resolve(
+          [],
+          path.join(dir, "subdir", "nested", "file.ts"),
+          MessageID.make("msg_message-test-alias-1"),
+        )
+        expect(results).toEqual([])
+      }),
+    ),
+  )
+
   test.todo("fetches remote instructions from config URLs via HttpClient", () => {})
 })
 
@@ -222,9 +240,10 @@ describe("Instruction.system", () => {
         expect(paths.has(path.join(globalTmp, "AGENTS.md"))).toBe(true)
 
         const rules = yield* svc.system()
-        expect(rules).toHaveLength(2)
-        expect(rules[0]).toBe(`Instructions from: ${path.join(globalTmp, "AGENTS.md")}\n# Global Instructions`)
-        expect(rules[1]).toBe(`Instructions from: ${path.join(projectTmp, "AGENTS.md")}\n# Project Instructions`)
+        expect(rules).toHaveLength(3)
+        expect(rules[0]).toStartWith("Follow applicable AGENTS.md instructions supplied with this request")
+        expect(rules[1]).toBe(`Instructions from: ${path.join(globalTmp, "AGENTS.md")}\n# Global Instructions`)
+        expect(rules[2]).toBe(`Instructions from: ${path.join(projectTmp, "AGENTS.md")}\n# Project Instructions`)
       }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
     }),
   )
@@ -258,6 +277,24 @@ describe("Instruction.systemPaths global config", () => {
         const svc = yield* Instruction.Service
         const paths = yield* svc.systemPaths()
         expect(paths.has(path.join(globalTmp, "AGENTS.md"))).toBe(true)
+      }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
+    }),
+  )
+
+  it.live("loads a global AGENTS.md that symlinks to the project AGENTS.md once", () =>
+    Effect.gen(function* () {
+      const projectTmp = yield* tmpWithFiles({ "AGENTS.md": "# Shared Instructions" })
+      const globalTmp = yield* tmpdirScoped()
+      const fs = yield* FileSystem.FileSystem
+      yield* fs.symlink(path.join(projectTmp, "AGENTS.md"), path.join(globalTmp, "AGENTS.md"))
+
+      yield* Effect.gen(function* () {
+        const svc = yield* Instruction.Service
+        const paths = yield* svc.systemPaths()
+        expect(Array.from(paths)).toEqual([path.join(globalTmp, "AGENTS.md")])
+
+        const rules = yield* svc.system()
+        expect(rules.filter((rule) => rule.includes("# Shared Instructions"))).toHaveLength(1)
       }).pipe(provideInstance(projectTmp), provideInstruction({ home: globalTmp, config: globalTmp }))
     }),
   )
