@@ -102,6 +102,8 @@ When opencode starts, it looks for rule files in this order:
 
 The first matching file wins in each category. For example, if you have both `AGENTS.md` and `CLAUDE.md`, only `AGENTS.md` is used. Similarly, `~/.config/opencode/AGENTS.md` takes precedence over `~/.claude/CLAUDE.md`.
 
+Files that resolve to the same real path, such as a global `AGENTS.md` symlinked to the project's, are loaded once. When any rules are loaded, opencode prepends a short note telling the model to treat them as its binding workflow instructions.
+
 ---
 
 ## Custom Instructions
